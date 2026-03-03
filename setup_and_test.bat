@@ -1,6 +1,8 @@
 @echo off
-call S:\Code\vLLM\.venv\Scripts\activate.bat
-pip install -e .[dev]
+set VIRTUAL_ENV=
+if not exist .venv uv venv
+call .venv\Scripts\activate.bat
+uv pip install -e .[dev]
 echo === PIP INSTALL DONE ===
-python -m pytest tests/ -v
+uv run pytest tests/ -v
 echo === TESTS DONE ===
