@@ -1,4 +1,4 @@
-# WinLLM 🚀
+# WinLLM 
 
 A Windows-native LLM inference and serving engine inspired by [vLLM](https://github.com/vllm-project/vllm).
 
