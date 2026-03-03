@@ -29,7 +29,7 @@ def _apply_auto_config(model_config, scheduler_config, kv_cache_config):
     from .device import DeviceInfo
     hw = DeviceInfo.detect()
 
-    print(f"\n  🔍 Detected: {hw.device_count} GPU(s), {hw.total_vram_gb} GB total VRAM")
+    print(f"\n  Detected: {hw.device_count} GPU(s), {hw.total_vram_gb} GB total VRAM")
     print(f"     Profile:  {hw.profile.value}")
     for gpu in hw.devices:
         print(f"     GPU {gpu.index}: {gpu.name} ({gpu.total_vram_gb} GB)")
@@ -38,10 +38,7 @@ def _apply_auto_config(model_config, scheduler_config, kv_cache_config):
     scheduler_config.apply_hardware_defaults(hw.defaults)
     kv_cache_config.apply_hardware_defaults(hw.defaults)
 
-    print(f"     Auto-config → quant={model_config.quantization.value}, "
-          f"batch={scheduler_config.max_batch_size}, "
-          f"ctx={model_config.max_model_len}, "
-          f"tp={model_config.tensor_parallel_size}")
+
     return hw
 
 
@@ -92,14 +89,13 @@ def cmd_serve(args):
     offload_str = ", cpu_offload=on" if model_config.cpu_offload else ""
 
     print(f"""
-╔══════════════════════════════════════════════════════════════╗
-║                      🚀 WinLLM v0.1.0                      ║
-╠══════════════════════════════════════════════════════════════╣
-║  Model:    {args.model:<48s}║
-║  Quant:    {model_config.quantization.value:<48s}║
-║  Device:   {model_config.device_map_strategy}{tp_str}{offload_str:<{48 - len(tp_str) - len(offload_str)}}║
-║  Server:   http://{args.host}:{args.port:<39}║
-╚══════════════════════════════════════════════════════════════╝
+WinLLM v0.1.0
+--------------------------------------------------------------
+  Model:    {args.model}
+  Quant:    {model_config.quantization.value}
+  Device:   {model_config.device_map_strategy}{tp_str}{offload_str}
+  Server:   http://{args.host}:{args.port}
+--------------------------------------------------------------
 """)
 
     app = create_app(model_config, server_config, scheduler_config, kv_cache_config)
@@ -151,7 +147,7 @@ def cmd_chat(args):
     try:
         while True:
             try:
-                user_input = input("\n🧑 You: ").strip()
+                user_input = input("\nYou: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nBye!")
                 break
@@ -181,7 +177,7 @@ def cmd_chat(args):
                 parts.append("Assistant:")
                 prompt = "\n".join(parts)
 
-            print("\n🤖 Assistant: ", end="", flush=True)
+            print("\nAssistant: ", end="", flush=True)
             collected = []
 
             def on_token(text: str, finished: bool):
@@ -198,11 +194,7 @@ def cmd_chat(args):
             result = engine.generate(request)
             print()
 
-            print(
-                f"  [{result.generation_tokens} tokens, "
-                f"{result.tokens_per_second:.1f} tok/s, "
-                f"{result.elapsed:.2f}s]"
-            )
+
 
             messages.append({"role": "assistant", "content": result.output_text})
 
@@ -287,32 +279,27 @@ def cmd_detect(args):
 
     hw = DeviceInfo.detect()
 
-    print(f"""
-╔══════════════════════════════════════════════════════════════╗
-║                   🔍 Hardware Detection                     ║
-╠══════════════════════════════════════════════════════════════╣""")
+    print(f"\nHardware Detection")
+    print(f"--------------------------------------------------------------")
 
     if hw.device_count == 0:
-        print(f"║  No GPUs detected — CPU-only mode                          ║")
+        print(f"  No GPUs detected — CPU-only mode")
     else:
         for gpu in hw.devices:
-            name_line = f"  GPU {gpu.index}: {gpu.name} ({gpu.total_vram_gb} GB)"
-            print(f"║{name_line:<62}║")
+            print(f"  GPU {gpu.index}: {gpu.name} ({gpu.total_vram_gb} GB)")
 
-    print(f"║{'':62s}║")
-    print(f"║  Profile:     {hw.profile.value:<47s}║")
-    print(f"║  Platform:    {hw.platform:<47s}║")
-    print(f"║  Total VRAM:  {hw.total_vram_gb:<47.1f}║")
-    print(f"║{'':62s}║")
-    print(f"║  Recommended defaults:{'':40s}║")
+    print(f"\n  Profile:     {hw.profile.value}")
+    print(f"  Platform:    {hw.platform}")
+    print(f"  Total VRAM:  {hw.total_vram_gb}")
+    
+    print(f"\nRecommended defaults:")
     d = hw.defaults
-    print(f"║    Quantization:       {d.default_quantization:<38s}║")
-    print(f"║    Max batch size:     {d.max_batch_size:<38d}║")
-    print(f"║    Max context length: {d.max_model_len:<38d}║")
-    print(f"║    Tensor parallel:    {d.tensor_parallel_size:<38d}║")
-    print(f"║    Device map:         {d.device_map_strategy:<38s}║")
-
-    print(f"╚══════════════════════════════════════════════════════════════╝")
+    print(f"  Quantization:       {d.default_quantization}")
+    print(f"  Max batch size:     {d.max_batch_size}")
+    print(f"  Max context length: {d.max_model_len}")
+    print(f"  Tensor parallel:    {d.tensor_parallel_size}")
+    print(f"  Device map:         {d.device_map_strategy}")
+    print(f"--------------------------------------------------------------")
 
     if args.json:
         print(f"\nJSON:\n{json.dumps(hw.summary(), indent=2)}")

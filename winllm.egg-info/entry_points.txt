@@ -1,2 +1,0 @@
-[console_scripts]
-winllm = winllm.cli:main
