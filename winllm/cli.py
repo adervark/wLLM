@@ -6,6 +6,13 @@ import argparse
 import logging
 import sys
 
+# Windows console encoding fix
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
 
 def setup_logging(verbose: bool = False):
     """Configure logging."""
@@ -44,15 +51,21 @@ def cmd_serve(args):
     from .config import ModelConfig, QuantizationType, ServerConfig, SchedulerConfig, KVCacheConfig
     from .api_server import create_app
 
-    quant_map = {"none": QuantizationType.NONE, "4bit": QuantizationType.NF4, "8bit": QuantizationType.INT8}
-    quantization = quant_map.get(args.quantization, QuantizationType.NF4)
+    quant_map = {"auto": None, "none": QuantizationType.NONE, "4bit": QuantizationType.NF4, "8bit": QuantizationType.INT8}
+    quantization = quant_map.get(args.quantization)
 
+    model_config_kwargs = {"model_name_or_path": args.model}
+    if quantization is not None:
+        model_config_kwargs["quantization"] = quantization
+    if args.max_model_len is not None:
+        model_config_kwargs["max_model_len"] = args.max_model_len
+    if args.trust_remote_code:
+        model_config_kwargs["trust_remote_code"] = True
+    if args.gpu_memory_utilization is not None:
+        model_config_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
+        
     model_config = ModelConfig(
-        model_name_or_path=args.model,
-        quantization=quantization,
-        max_model_len=args.max_model_len,
-        trust_remote_code=args.trust_remote_code,
-        gpu_memory_utilization=args.gpu_memory_utilization,
+        **model_config_kwargs,
         tensor_parallel_size=args.tensor_parallel_size,
         device_map_strategy=args.device_map_strategy,
         cpu_offload=args.cpu_offload,
@@ -200,14 +213,19 @@ def cmd_benchmark(args):
     from .engine import InferenceEngine, GenerationRequest
     from .model_loader import get_aggregate_gpu_memory
 
-    quant_map = {"none": QuantizationType.NONE, "4bit": QuantizationType.NF4, "8bit": QuantizationType.INT8}
-    quantization = quant_map.get(args.quantization, QuantizationType.NF4)
+    quant_map = {"auto": None, "none": QuantizationType.NONE, "4bit": QuantizationType.NF4, "8bit": QuantizationType.INT8}
+    quantization = quant_map.get(args.quantization)
 
+    model_config_kwargs = {"model_name_or_path": args.model}
+    if quantization is not None:
+        model_config_kwargs["quantization"] = quantization
+    if args.max_model_len is not None:
+        model_config_kwargs["max_model_len"] = args.max_model_len
+    if args.trust_remote_code:
+        model_config_kwargs["trust_remote_code"] = True
+        
     model_config = ModelConfig(
-        model_name_or_path=args.model,
-        quantization=quantization,
-        max_model_len=args.max_model_len,
-        trust_remote_code=args.trust_remote_code,
+        **model_config_kwargs,
         tensor_parallel_size=args.tensor_parallel_size,
         cpu_offload=args.cpu_offload,
         device=args.device,
@@ -215,8 +233,9 @@ def cmd_benchmark(args):
 
     kv_cache_config = KVCacheConfig()
 
+    scheduler_config = SchedulerConfig()
+    
     if args.auto_config:
-        scheduler_config = SchedulerConfig()
         _apply_auto_config(model_config, scheduler_config, kv_cache_config)
 
     engine = InferenceEngine(model_config, kv_cache_config)
@@ -320,22 +339,22 @@ def main():
     # --- serve ---
     serve_parser = subparsers.add_parser("serve", help="Start OpenAI-compatible API server")
     serve_parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
-    serve_parser.add_argument("--quantization", "-q", choices=["none", "4bit", "8bit"], default="4bit")
+    serve_parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
     serve_parser.add_argument("--host", default="0.0.0.0")
     serve_parser.add_argument("--port", "-p", type=int, default=8000)
-    serve_parser.add_argument("--max-model-len", type=int, default=4096)
+    serve_parser.add_argument("--max-model-len", type=int, default=None, help="Auto-detected if not specified")
     serve_parser.add_argument("--max-batch-size", type=int, default=4)
     serve_parser.add_argument("--model-alias", default=None, help="Override model name in API responses")
     serve_parser.add_argument("--trust-remote-code", action="store_true")
-    serve_parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    serve_parser.add_argument("--gpu-memory-utilization", type=float, default=None)
     serve_parser.add_argument("--verbose", "-v", action="store_true")
     _add_scaling_args(serve_parser)
 
     # --- chat ---
     chat_parser = subparsers.add_parser("chat", help="Interactive chat in terminal")
     chat_parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
-    chat_parser.add_argument("--quantization", "-q", choices=["none", "4bit", "8bit"], default="4bit")
-    chat_parser.add_argument("--max-model-len", type=int, default=4096)
+    chat_parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
+    chat_parser.add_argument("--max-model-len", type=int, default=None)
     chat_parser.add_argument("--max-tokens", type=int, default=512)
     chat_parser.add_argument("--temperature", type=float, default=0.7)
     chat_parser.add_argument("--system-prompt", "-s", default=None, help="System prompt")
@@ -346,8 +365,8 @@ def main():
     # --- benchmark ---
     bench_parser = subparsers.add_parser("benchmark", help="Run throughput benchmark")
     bench_parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
-    bench_parser.add_argument("--quantization", "-q", choices=["none", "4bit", "8bit"], default="4bit")
-    bench_parser.add_argument("--max-model-len", type=int, default=4096)
+    bench_parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
+    bench_parser.add_argument("--max-model-len", type=int, default=None)
     bench_parser.add_argument("--max-tokens", type=int, default=256)
     bench_parser.add_argument("--num-prompts", type=int, default=5)
     bench_parser.add_argument("--trust-remote-code", action="store_true")

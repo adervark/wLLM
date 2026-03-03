@@ -48,10 +48,12 @@ class ModelConfig:
     def apply_hardware_defaults(self, defaults):
         """Apply auto-detected hardware defaults (only overwrites unset/default values)."""
         from .device import HardwareDefaults
+        from .registry import identify_model_profile, apply_model_profile
+        
         if not isinstance(defaults, HardwareDefaults):
             return
 
-        # Only apply if user hasn't explicitly changed from the original defaults
+        # 1. Apply hardware defaults first
         if self.quantization == QuantizationType.NF4 and defaults.default_quantization == "none":
             self.quantization = QuantizationType.NONE
         if self.max_model_len == 4096:
@@ -61,6 +63,12 @@ class ModelConfig:
         if self.device_map_strategy == "auto":
             self.device_map_strategy = defaults.device_map_strategy
         self.gpu_memory_utilization = defaults.gpu_memory_utilization
+
+        # 2. Attempt to identify model profile and apply heuristics
+        profile = identify_model_profile(self.model_name_or_path)
+        if profile:
+            apply_model_profile(self, profile)
+
 
 
 @dataclass
