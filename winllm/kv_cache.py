@@ -117,7 +117,7 @@ class KVCacheManager:
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
             allocated = torch.cuda.memory_allocated(i)
-            total_available += props.total_mem - allocated
+            total_available += props.total_memory - allocated
 
         return total_available
 
@@ -134,7 +134,7 @@ class KVCacheManager:
 
         # Scale cap based on total VRAM rather than fixed 2048
         total_vram_gb = sum(
-            torch.cuda.get_device_properties(i).total_mem / (1024 ** 3)
+            torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
             for i in range(torch.cuda.device_count())
         )
         # ~500 blocks per 10GB as a reasonable cap

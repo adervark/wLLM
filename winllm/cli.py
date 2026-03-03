@@ -114,15 +114,18 @@ def cmd_chat(args):
     quant_map = {"none": QuantizationType.NONE, "4bit": QuantizationType.NF4, "8bit": QuantizationType.INT8}
     quantization = quant_map.get(args.quantization, QuantizationType.NF4)
 
-    model_config = ModelConfig(
-        model_name_or_path=args.model,
-        quantization=quantization,
-        max_model_len=args.max_model_len,
-        trust_remote_code=args.trust_remote_code,
-        tensor_parallel_size=args.tensor_parallel_size,
-        cpu_offload=args.cpu_offload,
-        device=args.device,
-    )
+    model_config_kwargs = {
+        "model_name_or_path": args.model,
+        "quantization": quantization,
+        "trust_remote_code": args.trust_remote_code,
+        "tensor_parallel_size": args.tensor_parallel_size,
+        "cpu_offload": args.cpu_offload,
+        "device": args.device,
+    }
+    if args.max_model_len is not None:
+        model_config_kwargs["max_model_len"] = args.max_model_len
+
+    model_config = ModelConfig(**model_config_kwargs)
 
     kv_cache_config = KVCacheConfig()
 

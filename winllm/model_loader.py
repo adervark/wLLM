@@ -45,7 +45,7 @@ def get_gpu_memory_info(device_index: int = 0) -> dict[str, float]:
     if device_index >= torch.cuda.device_count():
         return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
 
-    total = torch.cuda.get_device_properties(device_index).total_mem / (1024 ** 3)
+    total = torch.cuda.get_device_properties(device_index).total_memory / (1024 ** 3)
     allocated = torch.cuda.memory_allocated(device_index) / (1024 ** 3)
     reserved = torch.cuda.memory_reserved(device_index) / (1024 ** 3)
     free = total - reserved
@@ -67,7 +67,7 @@ def get_aggregate_gpu_memory() -> dict[str, float]:
 
     for i in range(count):
         props = torch.cuda.get_device_properties(i)
-        total += props.total_mem / (1024 ** 3)
+        total += props.total_memory / (1024 ** 3)
         allocated += torch.cuda.memory_allocated(i) / (1024 ** 3)
         reserved += torch.cuda.memory_reserved(i) / (1024 ** 3)
 

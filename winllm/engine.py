@@ -215,12 +215,29 @@ class InferenceEngine:
         next_token = next_token_id.item()
         request.output_token_ids.append(next_token)
 
-        # Stream first token
-        if request._stream_callback:
-            token_text = self.tokenizer.decode(
-                [next_token], skip_special_tokens=True
-            )
-            request._stream_callback(token_text, False)
+        # We need to handle subwords and spaces properly in the stream.
+        # Natively decoding one token at a time drops leading spaces for many tokenizers (like SentencePiece).
+        # To fix this, we decode the full sequence (prompt + output) to ensure correct spacing,
+        # and only yield the new substring appended to the prefix.
+        
+        initial_prompt_text = self.tokenizer.decode(
+            request.prompt_token_ids, skip_special_tokens=True
+        )
+        prefix_len = len(initial_prompt_text)
+        
+        def _stream_token():
+            nonlocal prefix_len
+            if request._stream_callback:
+                # Decode prompt + current output to maintain subword boundaries
+                full_ids = request.prompt_token_ids + request.output_token_ids
+                current_text = self.tokenizer.decode(
+                    full_ids, skip_special_tokens=True
+                )
+                if len(current_text) > prefix_len:
+                    request._stream_callback(current_text[prefix_len:], False)
+                    prefix_len = len(current_text)
+
+        _stream_token()
 
         # === Decode loop ===
         for step in range(1, max_new_tokens):
@@ -263,11 +280,7 @@ class InferenceEngine:
             self.kv_cache_manager.extend_sequence(request.request_id, 1)
 
             # Stream token
-            if request._stream_callback:
-                token_text = self.tokenizer.decode(
-                    [next_token], skip_special_tokens=True
-                )
-                request._stream_callback(token_text, False)
+            _stream_token()
 
         # Finalize
         if not request.output_text:
