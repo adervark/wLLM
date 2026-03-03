@@ -56,7 +56,7 @@ class ModelConfig:
         # 1. Apply hardware defaults first
         if self.quantization == QuantizationType.NF4 and defaults.default_quantization == "none":
             self.quantization = QuantizationType.NONE
-        if self.max_model_len == 4096:
+        if self.max_model_len == 4096 and defaults.max_model_len is not None:
             self.max_model_len = defaults.max_model_len
         if self.tensor_parallel_size == 1 and defaults.tensor_parallel_size > 1:
             self.tensor_parallel_size = defaults.tensor_parallel_size

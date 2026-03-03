@@ -141,7 +141,7 @@ class DeviceInfo:
             gpu = GPUInfo(
                 index=i,
                 name=props.name,
-                total_vram_gb=round(props.total_mem / (1024 ** 3), 2),
+                total_vram_gb=round(props.total_memory / (1024 ** 3), 2),
                 compute_capability=(props.major, props.minor),
             )
             info.devices.append(gpu)
@@ -232,7 +232,7 @@ def get_all_gpu_memory_info() -> list[dict[str, float]]:
 
     result = []
     for i in range(torch.cuda.device_count()):
-        total = torch.cuda.get_device_properties(i).total_mem / (1024 ** 3)
+        total = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
         allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)
         reserved = torch.cuda.memory_reserved(i) / (1024 ** 3)
         result.append({
@@ -255,5 +255,5 @@ def get_total_gpu_memory() -> float:
 
     total = 0.0
     for i in range(torch.cuda.device_count()):
-        total += torch.cuda.get_device_properties(i).total_mem
+        total += torch.cuda.get_device_properties(i).total_memory
     return total

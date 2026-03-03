@@ -23,8 +23,8 @@ uv venv .venv
 .venv\Scripts\activate
 
 # Install with CUDA support
-uv pip install torch --index-url https://download.pytorch.org/whl/cu124
-uv pip install -e .
+uv pip install torch --extra-index-url https://download.pytorch.org/whl/cu124
+uv pip install -e . --extra-index-url https://download.pytorch.org/whl/cu124
 ```
 
 ### Chat in Terminal
