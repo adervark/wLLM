@@ -67,7 +67,7 @@ PROFILE_DEFAULTS: dict[HardwareProfile, HardwareDefaults] = {
     ),
     HardwareProfile.LAPTOP: HardwareDefaults(
         default_quantization="4bit",
-        max_batch_size=4,
+        max_batch_size=1,
         max_model_len=4096,
         device_map_strategy="auto",
         tensor_parallel_size=1,
