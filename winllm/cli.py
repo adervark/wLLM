@@ -6,12 +6,22 @@ import argparse
 import logging
 import sys
 
+from .config import QuantizationType
+
 # Windows console encoding fix
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except AttributeError:
         pass
+
+# Shared quantization string → enum mapping
+QUANT_MAP = {
+    "auto": None,
+    "none": QuantizationType.NONE,
+    "4bit": QuantizationType.NF4,
+    "8bit": QuantizationType.INT8,
+}
 
 
 def setup_logging(verbose: bool = False):
@@ -22,6 +32,39 @@ def setup_logging(verbose: bool = False):
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+def _add_common_model_args(parser):
+    """Add model-related arguments shared by serve, chat, and benchmark."""
+    parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
+    parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
+    parser.add_argument("--max-model-len", type=int, default=None, help="Auto-detected if not specified")
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--verbose", "-v", action="store_true")
+
+
+def _build_model_config(args):
+    """Build a ModelConfig from parsed CLI args (shared by all commands)."""
+    from .config import ModelConfig
+
+    quantization = QUANT_MAP.get(args.quantization)
+
+    kwargs = {"model_name_or_path": args.model}
+    if quantization is not None:
+        kwargs["quantization"] = quantization
+    if args.max_model_len is not None:
+        kwargs["max_model_len"] = args.max_model_len
+    if args.trust_remote_code:
+        kwargs["trust_remote_code"] = True
+    if hasattr(args, "gpu_memory_utilization") and args.gpu_memory_utilization is not None:
+        kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
+
+    kwargs["tensor_parallel_size"] = args.tensor_parallel_size
+    kwargs["device_map_strategy"] = args.device_map_strategy
+    kwargs["cpu_offload"] = args.cpu_offload
+    kwargs["device"] = args.device
+
+    return ModelConfig(**kwargs)
 
 
 def _apply_auto_config(model_config, scheduler_config, kv_cache_config):
@@ -38,36 +81,16 @@ def _apply_auto_config(model_config, scheduler_config, kv_cache_config):
     scheduler_config.apply_hardware_defaults(hw.defaults)
     kv_cache_config.apply_hardware_defaults(hw.defaults)
 
-
     return hw
 
 
 def cmd_serve(args):
     """Start the API server."""
     import uvicorn
-    from .config import ModelConfig, QuantizationType, ServerConfig, SchedulerConfig, KVCacheConfig
+    from .config import ServerConfig, SchedulerConfig, KVCacheConfig
     from .api_server import create_app
 
-    quant_map = {"auto": None, "none": QuantizationType.NONE, "4bit": QuantizationType.NF4, "8bit": QuantizationType.INT8}
-    quantization = quant_map.get(args.quantization)
-
-    model_config_kwargs = {"model_name_or_path": args.model}
-    if quantization is not None:
-        model_config_kwargs["quantization"] = quantization
-    if args.max_model_len is not None:
-        model_config_kwargs["max_model_len"] = args.max_model_len
-    if args.trust_remote_code:
-        model_config_kwargs["trust_remote_code"] = True
-    if args.gpu_memory_utilization is not None:
-        model_config_kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
-        
-    model_config = ModelConfig(
-        **model_config_kwargs,
-        tensor_parallel_size=args.tensor_parallel_size,
-        device_map_strategy=args.device_map_strategy,
-        cpu_offload=args.cpu_offload,
-        device=args.device,
-    )
+    model_config = _build_model_config(args)
 
     server_config = ServerConfig(
         host=args.host,
@@ -104,25 +127,11 @@ WinLLM v0.1.0
 
 def cmd_chat(args):
     """Interactive chat in the terminal."""
-    from .config import ModelConfig, QuantizationType, SamplingParams, SchedulerConfig, KVCacheConfig
+    from .config import SamplingParams, SchedulerConfig, KVCacheConfig
     from .engine import InferenceEngine, GenerationRequest
+    from .utils import format_chat_prompt
 
-    quant_map = {"none": QuantizationType.NONE, "4bit": QuantizationType.NF4, "8bit": QuantizationType.INT8}
-    quantization = quant_map.get(args.quantization, QuantizationType.NF4)
-
-    model_config_kwargs = {
-        "model_name_or_path": args.model,
-        "quantization": quantization,
-        "trust_remote_code": args.trust_remote_code,
-        "tensor_parallel_size": args.tensor_parallel_size,
-        "cpu_offload": args.cpu_offload,
-        "device": args.device,
-    }
-    if args.max_model_len is not None:
-        model_config_kwargs["max_model_len"] = args.max_model_len
-
-    model_config = ModelConfig(**model_config_kwargs)
-
+    model_config = _build_model_config(args)
     kv_cache_config = KVCacheConfig()
 
     if args.auto_config:
@@ -161,21 +170,7 @@ def cmd_chat(args):
 
             messages.append({"role": "user", "content": user_input})
 
-            try:
-                prompt = engine.tokenizer.apply_chat_template(
-                    messages, tokenize=False, add_generation_prompt=True
-                )
-            except Exception:
-                parts = []
-                for msg in messages:
-                    if msg["role"] == "system":
-                        parts.append(f"System: {msg['content']}")
-                    elif msg["role"] == "user":
-                        parts.append(f"User: {msg['content']}")
-                    elif msg["role"] == "assistant":
-                        parts.append(f"Assistant: {msg['content']}")
-                parts.append("Assistant:")
-                prompt = "\n".join(parts)
+            prompt = format_chat_prompt(engine.tokenizer, messages)
 
             print("\nAssistant: ", end="", flush=True)
             collected = []
@@ -194,8 +189,6 @@ def cmd_chat(args):
             result = engine.generate(request)
             print()
 
-
-
             messages.append({"role": "assistant", "content": result.output_text})
 
     finally:
@@ -204,32 +197,14 @@ def cmd_chat(args):
 
 def cmd_benchmark(args):
     """Run a simple throughput benchmark."""
-    from .config import ModelConfig, QuantizationType, SamplingParams, SchedulerConfig, KVCacheConfig
+    from .config import SamplingParams, SchedulerConfig, KVCacheConfig
     from .engine import InferenceEngine, GenerationRequest
-    from .model_loader import get_aggregate_gpu_memory
+    from .device import get_aggregate_gpu_memory
 
-    quant_map = {"auto": None, "none": QuantizationType.NONE, "4bit": QuantizationType.NF4, "8bit": QuantizationType.INT8}
-    quantization = quant_map.get(args.quantization)
-
-    model_config_kwargs = {"model_name_or_path": args.model}
-    if quantization is not None:
-        model_config_kwargs["quantization"] = quantization
-    if args.max_model_len is not None:
-        model_config_kwargs["max_model_len"] = args.max_model_len
-    if args.trust_remote_code:
-        model_config_kwargs["trust_remote_code"] = True
-        
-    model_config = ModelConfig(
-        **model_config_kwargs,
-        tensor_parallel_size=args.tensor_parallel_size,
-        cpu_offload=args.cpu_offload,
-        device=args.device,
-    )
-
+    model_config = _build_model_config(args)
     kv_cache_config = KVCacheConfig()
-
     scheduler_config = SchedulerConfig()
-    
+
     if args.auto_config:
         _apply_auto_config(model_config, scheduler_config, kv_cache_config)
 
@@ -328,39 +303,27 @@ def main():
 
     # --- serve ---
     serve_parser = subparsers.add_parser("serve", help="Start OpenAI-compatible API server")
-    serve_parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
-    serve_parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
+    _add_common_model_args(serve_parser)
     serve_parser.add_argument("--host", default="0.0.0.0")
     serve_parser.add_argument("--port", "-p", type=int, default=8000)
-    serve_parser.add_argument("--max-model-len", type=int, default=None, help="Auto-detected if not specified")
     serve_parser.add_argument("--max-batch-size", type=int, default=4)
     serve_parser.add_argument("--model-alias", default=None, help="Override model name in API responses")
-    serve_parser.add_argument("--trust-remote-code", action="store_true")
     serve_parser.add_argument("--gpu-memory-utilization", type=float, default=None)
-    serve_parser.add_argument("--verbose", "-v", action="store_true")
     _add_scaling_args(serve_parser)
 
     # --- chat ---
     chat_parser = subparsers.add_parser("chat", help="Interactive chat in terminal")
-    chat_parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
-    chat_parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
-    chat_parser.add_argument("--max-model-len", type=int, default=None)
+    _add_common_model_args(chat_parser)
     chat_parser.add_argument("--max-tokens", type=int, default=512)
     chat_parser.add_argument("--temperature", type=float, default=0.7)
     chat_parser.add_argument("--system-prompt", "-s", default=None, help="System prompt")
-    chat_parser.add_argument("--trust-remote-code", action="store_true")
-    chat_parser.add_argument("--verbose", "-v", action="store_true")
     _add_scaling_args(chat_parser)
 
     # --- benchmark ---
     bench_parser = subparsers.add_parser("benchmark", help="Run throughput benchmark")
-    bench_parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
-    bench_parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
-    bench_parser.add_argument("--max-model-len", type=int, default=None)
+    _add_common_model_args(bench_parser)
     bench_parser.add_argument("--max-tokens", type=int, default=256)
     bench_parser.add_argument("--num-prompts", type=int, default=5)
-    bench_parser.add_argument("--trust-remote-code", action="store_true")
-    bench_parser.add_argument("--verbose", "-v", action="store_true")
     _add_scaling_args(bench_parser)
 
     # --- detect ---

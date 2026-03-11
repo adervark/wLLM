@@ -16,7 +16,7 @@ from transformers import (
 )
 
 from .config import ModelConfig, QuantizationType, KVCacheConfig
-from .device import get_all_gpu_memory_info
+from .device import get_all_gpu_memory_info, get_gpu_memory_info, get_aggregate_gpu_memory
 
 logger = logging.getLogger(__name__)
 
@@ -37,47 +37,8 @@ def _build_quantization_config(model_config: ModelConfig) -> Optional[BitsAndByt
     return None
 
 
-def get_gpu_memory_info(device_index: int = 0) -> dict[str, float]:
-    """Get current GPU memory usage in GB for a single device."""
-    if not torch.cuda.is_available():
-        return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
-
-    if device_index >= torch.cuda.device_count():
-        return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
-
-    total = torch.cuda.get_device_properties(device_index).total_memory / (1024 ** 3)
-    allocated = torch.cuda.memory_allocated(device_index) / (1024 ** 3)
-    reserved = torch.cuda.memory_reserved(device_index) / (1024 ** 3)
-    free = total - reserved
-    return {
-        "total": round(total, 2),
-        "allocated": round(allocated, 2),
-        "reserved": round(reserved, 2),
-        "free": round(free, 2),
-    }
-
-
-def get_aggregate_gpu_memory() -> dict[str, float]:
-    """Get aggregate GPU memory across all devices."""
-    if not torch.cuda.is_available():
-        return {"total": 0, "allocated": 0, "reserved": 0, "free": 0, "device_count": 0}
-
-    total = allocated = reserved = 0.0
-    count = torch.cuda.device_count()
-
-    for i in range(count):
-        props = torch.cuda.get_device_properties(i)
-        total += props.total_memory / (1024 ** 3)
-        allocated += torch.cuda.memory_allocated(i) / (1024 ** 3)
-        reserved += torch.cuda.memory_reserved(i) / (1024 ** 3)
-
-    return {
-        "total": round(total, 2),
-        "allocated": round(allocated, 2),
-        "reserved": round(reserved, 2),
-        "free": round(total - reserved, 2),
-        "device_count": count,
-    }
+# GPU memory functions are now in device.py — re-exported here for backward compatibility.
+# get_gpu_memory_info and get_aggregate_gpu_memory are imported above from .device
 
 
 def _extract_model_kv_params(model: PreTrainedModel) -> dict:

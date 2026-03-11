@@ -18,6 +18,7 @@ from .config import ModelConfig, SamplingParams, SchedulerConfig, ServerConfig, 
 from .engine import GenerationRequest, InferenceEngine
 from .model_loader import get_gpu_memory_info
 from .scheduler import Scheduler
+from .utils import format_chat_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -171,35 +172,10 @@ def create_app(
         )
 
     def _format_chat_prompt(messages: list[ChatMessage]) -> str:
-        """Format chat messages into a prompt string.
-
-        Uses the tokenizer's chat template if available, otherwise
-        falls back to a simple format.
-        """
+        """Format chat messages into a prompt string."""
         if engine.tokenizer is None:
             raise HTTPException(status_code=503, detail="Model not loaded")
-
-        # Try using the tokenizer's built-in chat template
-        try:
-            message_dicts = [{"role": m.role, "content": m.content} for m in messages]
-            prompt = engine.tokenizer.apply_chat_template(
-                message_dicts,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
-            return prompt
-        except Exception:
-            # Fallback: simple format
-            parts = []
-            for msg in messages:
-                if msg.role == "system":
-                    parts.append(f"System: {msg.content}")
-                elif msg.role == "user":
-                    parts.append(f"User: {msg.content}")
-                elif msg.role == "assistant":
-                    parts.append(f"Assistant: {msg.content}")
-            parts.append("Assistant:")
-            return "\n".join(parts)
+        return format_chat_prompt(engine.tokenizer, messages)
 
     # --- Routes ---
 
@@ -227,7 +203,7 @@ def create_app(
 
         if req.stream:
             return EventSourceResponse(
-                _stream_chat_response(gen_request, model_display_name)
+                _stream_response(gen_request, model_display_name, "chat")
             )
 
         # Non-streaming
@@ -270,7 +246,7 @@ def create_app(
 
         if req.stream:
             return EventSourceResponse(
-                _stream_completion_response(gen_request, model_display_name)
+                _stream_response(gen_request, model_display_name, "completion")
             )
 
         result = await scheduler.submit(gen_request)
@@ -306,12 +282,24 @@ def create_app(
 
     # --- Streaming helpers ---
 
-    async def _stream_chat_response(gen_request: GenerationRequest, model_name: str):
-        """SSE stream for chat completions."""
+    async def _stream_response(
+        gen_request: GenerationRequest,
+        model_name: str,
+        response_type: str,
+    ):
+        """Unified SSE stream for both chat and text completions.
+
+        Args:
+            response_type: "chat" for chat completions, "completion" for text completions.
+        """
         import json
         import queue
 
-        request_id = f"chatcmpl-{gen_request.request_id}"
+        is_chat = response_type == "chat"
+        id_prefix = "chatcmpl" if is_chat else "cmpl"
+        object_type = "chat.completion.chunk" if is_chat else "text_completion"
+        request_id = f"{id_prefix}-{gen_request.request_id}"
+
         token_queue: queue.Queue[tuple[str, bool]] = queue.Queue()
 
         def callback(text: str, finished: bool):
@@ -327,87 +315,31 @@ def create_app(
             try:
                 text, finished = token_queue.get(timeout=0.05)
                 if finished:
-                    # Send final chunk with finish_reason
+                    # Final chunk with finish_reason
+                    choice = {"index": 0, "finish_reason": "stop"}
+                    choice["delta" if is_chat else "text"] = {} if is_chat else ""
                     chunk = {
                         "id": request_id,
-                        "object": "chat.completion.chunk",
+                        "object": object_type,
                         "created": int(time.time()),
                         "model": model_name,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {},
-                            "finish_reason": "stop",
-                        }],
+                        "choices": [choice],
                     }
                     yield {"data": json.dumps(chunk)}
                     yield {"data": "[DONE]"}
                     break
                 else:
+                    choice = {"index": 0, "finish_reason": None}
+                    if is_chat:
+                        choice["delta"] = {"content": text}
+                    else:
+                        choice["text"] = text
                     chunk = {
                         "id": request_id,
-                        "object": "chat.completion.chunk",
+                        "object": object_type,
                         "created": int(time.time()),
                         "model": model_name,
-                        "choices": [{
-                            "index": 0,
-                            "delta": {"content": text},
-                            "finish_reason": None,
-                        }],
-                    }
-                    yield {"data": json.dumps(chunk)}
-            except queue.Empty:
-                if gen_task.done():
-                    yield {"data": "[DONE]"}
-                    break
-                await asyncio.sleep(0.01)
-
-        await gen_task
-
-    async def _stream_completion_response(gen_request: GenerationRequest, model_name: str):
-        """SSE stream for text completions."""
-        import json
-        import queue
-
-        request_id = f"cmpl-{gen_request.request_id}"
-        token_queue: queue.Queue[tuple[str, bool]] = queue.Queue()
-
-        def callback(text: str, finished: bool):
-            token_queue.put((text, finished))
-
-        gen_request._stream_callback = callback
-
-        loop = asyncio.get_event_loop()
-        gen_task = loop.run_in_executor(None, engine.generate, gen_request)
-
-        while True:
-            try:
-                text, finished = token_queue.get(timeout=0.05)
-                if finished:
-                    chunk = {
-                        "id": request_id,
-                        "object": "text_completion",
-                        "created": int(time.time()),
-                        "model": model_name,
-                        "choices": [{
-                            "index": 0,
-                            "text": "",
-                            "finish_reason": "stop",
-                        }],
-                    }
-                    yield {"data": json.dumps(chunk)}
-                    yield {"data": "[DONE]"}
-                    break
-                else:
-                    chunk = {
-                        "id": request_id,
-                        "object": "text_completion",
-                        "created": int(time.time()),
-                        "model": model_name,
-                        "choices": [{
-                            "index": 0,
-                            "text": text,
-                            "finish_reason": None,
-                        }],
+                        "choices": [choice],
                     }
                     yield {"data": json.dumps(chunk)}
             except queue.Empty:
