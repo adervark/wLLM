@@ -257,3 +257,50 @@ def get_total_gpu_memory() -> float:
     for i in range(torch.cuda.device_count()):
         total += torch.cuda.get_device_properties(i).total_memory
     return total
+
+
+def get_gpu_memory_info(device_index: int = 0) -> dict[str, float]:
+    """Get current GPU memory usage in GB for a single device."""
+    import torch
+
+    if not torch.cuda.is_available():
+        return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
+
+    if device_index >= torch.cuda.device_count():
+        return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
+
+    total = torch.cuda.get_device_properties(device_index).total_memory / (1024 ** 3)
+    allocated = torch.cuda.memory_allocated(device_index) / (1024 ** 3)
+    reserved = torch.cuda.memory_reserved(device_index) / (1024 ** 3)
+    free = total - reserved
+    return {
+        "total": round(total, 2),
+        "allocated": round(allocated, 2),
+        "reserved": round(reserved, 2),
+        "free": round(free, 2),
+    }
+
+
+def get_aggregate_gpu_memory() -> dict[str, float]:
+    """Get aggregate GPU memory across all devices."""
+    import torch
+
+    if not torch.cuda.is_available():
+        return {"total": 0, "allocated": 0, "reserved": 0, "free": 0, "device_count": 0}
+
+    total = allocated = reserved = 0.0
+    count = torch.cuda.device_count()
+
+    for i in range(count):
+        props = torch.cuda.get_device_properties(i)
+        total += props.total_memory / (1024 ** 3)
+        allocated += torch.cuda.memory_allocated(i) / (1024 ** 3)
+        reserved += torch.cuda.memory_reserved(i) / (1024 ** 3)
+
+    return {
+        "total": round(total, 2),
+        "allocated": round(allocated, 2),
+        "reserved": round(reserved, 2),
+        "free": round(total - reserved, 2),
+        "device_count": count,
+    }
