@@ -247,6 +247,82 @@ def cmd_benchmark(args):
     engine.unload_model()
 
 
+def cmd_list(args):
+    """List downloaded models from the HuggingFace cache."""
+    import os
+    from pathlib import Path
+    from datetime import datetime
+
+    # Resolve cache directory
+    cache_dir = Path(os.environ.get(
+        "HF_HOME",
+        os.environ.get("HUGGINGFACE_HUB_CACHE",
+                       Path.home() / ".cache" / "huggingface" / "hub"),
+    ))
+
+    # HF_HOME points to the root; the actual model repos are under hub/
+    if (cache_dir / "hub").is_dir():
+        cache_dir = cache_dir / "hub"
+
+    if not cache_dir.is_dir():
+        print(f"Cache directory not found: {cache_dir}")
+        print("No models downloaded yet.")
+        return
+
+    # Scan for model directories (they start with "models--")
+    model_dirs = sorted([
+        d for d in cache_dir.iterdir()
+        if d.is_dir() and d.name.startswith("models--")
+    ])
+
+    if not model_dirs:
+        print("No models found in cache.")
+        return
+
+    # Collect model info
+    models = []
+    for d in model_dirs:
+        # Convert "models--meta-llama--Llama-2-7b-chat-hf" → "meta-llama/Llama-2-7b-chat-hf"
+        name = d.name.removeprefix("models--").replace("--", "/")
+
+        # Calculate total size
+        total_bytes = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+
+        # Get last modified time
+        try:
+            mtime = max(f.stat().st_mtime for f in d.rglob("*") if f.is_file())
+            modified = datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            modified = "unknown"
+
+        models.append((name, total_bytes, modified))
+
+    # Format sizes
+    def _fmt_size(b: int) -> str:
+        if b >= 1024 ** 3:
+            return f"{b / (1024 ** 3):.1f} GB"
+        elif b >= 1024 ** 2:
+            return f"{b / (1024 ** 2):.1f} MB"
+        else:
+            return f"{b / 1024:.0f} KB"
+
+    # Print table
+    name_width = max(len(m[0]) for m in models)
+    name_width = max(name_width, 5)  # min width for "MODEL" header
+
+    header_model = "MODEL".ljust(name_width)
+    print(f"\n  {header_model}   {'SIZE':>10}   {'MODIFIED':>16}")
+    print(f"  {'─' * name_width}   {'─' * 10}   {'─' * 16}")
+
+    total_size = 0
+    for name, size_bytes, modified in models:
+        total_size += size_bytes
+        print(f"  {name.ljust(name_width)}   {_fmt_size(size_bytes):>10}   {modified:>16}")
+
+    print(f"\n  {len(models)} model(s), {_fmt_size(total_size)} total")
+    print(f"  Cache: {cache_dir}\n")
+
+
 def cmd_detect(args):
     """Detect and display hardware info."""
     from .device import DeviceInfo
@@ -326,6 +402,10 @@ def main():
     bench_parser.add_argument("--num-prompts", type=int, default=5)
     _add_scaling_args(bench_parser)
 
+    # --- list ---
+    list_parser = subparsers.add_parser("list", help="List downloaded models from HuggingFace cache")
+    list_parser.add_argument("--verbose", "-v", action="store_true")
+
     # --- detect ---
     detect_parser = subparsers.add_parser("detect", help="Detect and display hardware info")
     detect_parser.add_argument("--json", action="store_true", help="Also print JSON output")
@@ -339,7 +419,7 @@ def main():
 
     setup_logging(getattr(args, "verbose", False))
 
-    cmd_map = {"serve": cmd_serve, "chat": cmd_chat, "benchmark": cmd_benchmark, "detect": cmd_detect}
+    cmd_map = {"serve": cmd_serve, "chat": cmd_chat, "benchmark": cmd_benchmark, "list": cmd_list, "detect": cmd_detect}
     cmd_map[args.command](args)
 
 
