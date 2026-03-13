@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request
@@ -118,10 +119,30 @@ def create_app(
     scheduler_config = scheduler_config or SchedulerConfig()
     kv_cache_config = kv_cache_config or KVCacheConfig()
 
+    # --- State (created early so lifespan can reference them) ---
+    engine = InferenceEngine(model_config, kv_cache_config)
+    scheduler = Scheduler(engine, scheduler_config)
+    model_display_name = server_config.model_alias or model_config.model_name_or_path
+
+    # --- Lifespan (replaces deprecated @app.on_event) ---
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Startup
+        logger.info("Starting WinLLM server...")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, engine.load_model)
+        logger.info("Server ready! Model: %s", model_display_name)
+        yield
+        # Shutdown
+        logger.info("Shutting down WinLLM server...")
+        engine.unload_model()
+
     app = FastAPI(
         title="WinLLM",
         description="Windows-native LLM inference engine — OpenAI-compatible API",
         version="0.1.0",
+        lifespan=lifespan,
     )
 
     # CORS
@@ -132,25 +153,6 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
-    # --- State ---
-    engine = InferenceEngine(model_config, kv_cache_config)
-    scheduler = Scheduler(engine, scheduler_config)
-    model_display_name = server_config.model_alias or model_config.model_name_or_path
-
-    # --- Startup / Shutdown ---
-
-    @app.on_event("startup")
-    async def startup():
-        logger.info("Starting WinLLM server...")
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, engine.load_model)
-        logger.info("Server ready! Model: %s", model_display_name)
-
-    @app.on_event("shutdown")
-    async def shutdown():
-        logger.info("Shutting down WinLLM server...")
-        engine.unload_model()
 
     # --- Helper ---
 
@@ -289,31 +291,77 @@ def create_app(
     ):
         """Unified SSE stream for both chat and text completions.
 
+        Uses asyncio.Queue with call_soon_threadsafe for a proper
+        async/sync bridge. Propagates errors as SSE error events.
+
         Args:
             response_type: "chat" for chat completions, "completion" for text completions.
         """
         import json
-        import queue
 
+        stream_timeout = server_config.stream_token_timeout
         is_chat = response_type == "chat"
         id_prefix = "chatcmpl" if is_chat else "cmpl"
         object_type = "chat.completion.chunk" if is_chat else "text_completion"
         request_id = f"{id_prefix}-{gen_request.request_id}"
 
-        token_queue: queue.Queue[tuple[str, bool]] = queue.Queue()
+        loop = asyncio.get_running_loop()
+        token_queue: asyncio.Queue[tuple[str, bool] | BaseException] = asyncio.Queue()
 
         def callback(text: str, finished: bool):
-            token_queue.put((text, finished))
+            loop.call_soon_threadsafe(token_queue.put_nowait, (text, finished))
 
         gen_request._stream_callback = callback
 
-        # Start generation in background
-        loop = asyncio.get_event_loop()
-        gen_task = loop.run_in_executor(None, engine.generate, gen_request)
-
-        while True:
+        def _run_generate():
             try:
-                text, finished = token_queue.get(timeout=0.05)
+                engine.generate(gen_request)
+            except BaseException as exc:
+                loop.call_soon_threadsafe(token_queue.put_nowait, exc)
+
+        # Start generation in background
+        gen_task = loop.run_in_executor(None, _run_generate)
+
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(
+                        token_queue.get(), timeout=stream_timeout
+                    )
+                except asyncio.TimeoutError:
+                    # Token generation stalled — cancel and notify client
+                    gen_request.cancel()
+                    error_chunk = {
+                        "id": request_id,
+                        "object": object_type,
+                        "created": int(time.time()),
+                        "model": model_name,
+                        "error": {
+                            "message": f"Token generation timed out after {stream_timeout}s",
+                            "type": "timeout",
+                        },
+                    }
+                    yield {"data": json.dumps(error_chunk)}
+                    yield {"data": "[DONE]"}
+                    break
+
+                # If the generation thread raised, send an error event
+                if isinstance(item, BaseException):
+                    error_chunk = {
+                        "id": request_id,
+                        "object": object_type,
+                        "created": int(time.time()),
+                        "model": model_name,
+                        "error": {
+                            "message": str(item),
+                            "type": type(item).__name__,
+                        },
+                    }
+                    yield {"data": json.dumps(error_chunk)}
+                    yield {"data": "[DONE]"}
+                    break
+
+                text, finished = item
                 if finished:
                     # Final chunk with finish_reason
                     choice = {"index": 0, "finish_reason": "stop"}
@@ -342,12 +390,7 @@ def create_app(
                         "choices": [choice],
                     }
                     yield {"data": json.dumps(chunk)}
-            except queue.Empty:
-                if gen_task.done():
-                    yield {"data": "[DONE]"}
-                    break
-                await asyncio.sleep(0.01)
-
-        await gen_task
+        finally:
+            await gen_task
 
     return app

@@ -60,7 +60,7 @@ class Scheduler:
         # Request queues
         self._waiting: deque[GenerationRequest] = deque()
         self._running: dict[str, GenerationRequest] = {}
-        self._completed: dict[str, GenerationRequest] = {}
+        self._completed: dict[str, tuple[float, GenerationRequest]] = {}  # req_id -> (finished_time, request)
 
         # Concurrency control
         self._semaphore = asyncio.Semaphore(self.config.max_batch_size)
@@ -103,7 +103,7 @@ class Scheduler:
 
             try:
                 # Run generation in thread pool (model inference is blocking)
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None, self.engine.generate, request
                 )
@@ -114,7 +114,8 @@ class Scheduler:
             finally:
                 async with self._lock:
                     self._running.pop(request.request_id, None)
-                    self._completed[request.request_id] = result
+                    self._completed[request.request_id] = (time.time(), result)
+                    self._evict_completed()
 
             # Update stats
             if result.status == RequestStatus.COMPLETED:
@@ -157,7 +158,8 @@ class Scheduler:
             finally:
                 async with self._lock:
                     self._running.pop(request.request_id, None)
-                    self._completed[request.request_id] = request
+                    self._completed[request.request_id] = (time.time(), request)
+                    self._evict_completed()
 
             if request.status == RequestStatus.COMPLETED:
                 self.stats.completed_requests += 1
@@ -173,11 +175,36 @@ class Scheduler:
         if request_id in self._running:
             return self._running[request_id]
         if request_id in self._completed:
-            return self._completed[request_id]
+            return self._completed[request_id][1]
         for req in self._waiting:
             if req.request_id == request_id:
                 return req
         return None
+
+    def _evict_completed(self):
+        """Remove old entries from _completed to prevent memory leaks.
+
+        Evicts by both TTL and max count. Should be called under self._lock.
+        """
+        ttl = self.config.completed_request_ttl
+        max_kept = self.config.max_completed_requests
+        now = time.time()
+
+        # 1. TTL eviction
+        expired = [
+            rid for rid, (finished_at, _) in self._completed.items()
+            if (now - finished_at) > ttl
+        ]
+        for rid in expired:
+            del self._completed[rid]
+
+        # 2. Count eviction (oldest first)
+        if len(self._completed) > max_kept:
+            sorted_ids = sorted(
+                self._completed, key=lambda rid: self._completed[rid][0]
+            )
+            for rid in sorted_ids[:len(self._completed) - max_kept]:
+                del self._completed[rid]
 
     def get_status(self) -> dict:
         """Get scheduler status."""
