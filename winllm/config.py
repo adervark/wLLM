@@ -102,6 +102,8 @@ class SchedulerConfig:
     max_waiting_requests: int = 64
     max_num_seqs: int = 8
     scheduling_policy: str = "fcfs"
+    max_completed_requests: int = 1000      # Max completed requests to keep in memory
+    completed_request_ttl: float = 300.0    # Seconds before completed requests are evicted
 
     def apply_hardware_defaults(self, defaults):
         """Apply auto-detected hardware defaults."""
@@ -120,6 +122,7 @@ class ServerConfig:
     model_alias: Optional[str] = None
     api_key: Optional[str] = None
     cors_origins: list[str] = field(default_factory=lambda: ["*"])
+    stream_token_timeout: float = 120.0  # Seconds to wait for each token during streaming
 
 
 @dataclass

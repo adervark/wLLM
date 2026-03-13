@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -48,6 +49,19 @@ class GenerationRequest:
     _stream_callback: Optional[Callable[[str, bool], None]] = field(
         default=None, repr=False
     )
+
+    # Cancellation (thread-safe)
+    _cancelled: threading.Event = field(
+        default_factory=threading.Event, repr=False
+    )
+
+    def cancel(self):
+        """Signal this request to stop generating."""
+        self._cancelled.set()
+
+    @property
+    def is_cancelled(self) -> bool:
+        return self._cancelled.is_set()
 
     @property
     def total_tokens(self) -> int:
@@ -245,6 +259,11 @@ class InferenceEngine:
             if next_token in stop_token_ids:
                 break
 
+            # Check cancellation
+            if request.is_cancelled:
+                request.status = RequestStatus.CANCELLED
+                break
+
             # Check stop strings
             current_text = self.tokenizer.decode(
                 request.output_token_ids, skip_special_tokens=True
@@ -288,7 +307,8 @@ class InferenceEngine:
                 request.output_token_ids, skip_special_tokens=True
             )
 
-        request.status = RequestStatus.COMPLETED
+        if request.status != RequestStatus.CANCELLED:
+            request.status = RequestStatus.COMPLETED
         request.finished_at = time.time()
 
         # Free KV cache tracking
@@ -314,35 +334,42 @@ class InferenceEngine:
     ) -> AsyncIterator[tuple[str, bool]]:
         """Async generator that yields (token_text, is_finished) tuples.
 
-        This wraps the synchronous generate in an async-friendly way
-        using a queue-based streaming approach.
+        Uses asyncio.Queue with call_soon_threadsafe for a proper
+        async/sync bridge — no busy-wait polling.
         """
         import asyncio
-        import queue
 
-        token_queue: queue.Queue[tuple[str, bool]] = queue.Queue()
+        loop = asyncio.get_event_loop()
+        token_queue: asyncio.Queue[tuple[str, bool] | BaseException] = asyncio.Queue()
 
         def stream_callback(text: str, finished: bool):
-            token_queue.put((text, finished))
+            loop.call_soon_threadsafe(token_queue.put_nowait, (text, finished))
 
         request._stream_callback = stream_callback
 
+        def _run_generate():
+            try:
+                self.generate(request)
+            except BaseException as exc:
+                # Push the exception so the async consumer can surface it
+                loop.call_soon_threadsafe(token_queue.put_nowait, exc)
+
         # Run generation in a thread to not block the event loop
-        loop = asyncio.get_event_loop()
-        gen_task = loop.run_in_executor(None, self.generate, request)
+        gen_task = loop.run_in_executor(None, _run_generate)
 
         # Yield tokens as they arrive
         while True:
-            try:
-                text, finished = token_queue.get(timeout=0.05)
-                yield text, finished
-                if finished:
-                    break
-            except queue.Empty:
-                # Check if generation is done (error case)
-                if gen_task.done():
-                    break
-                await asyncio.sleep(0.01)
+            item = await token_queue.get()
+
+            # If the generation thread raised, propagate the error
+            if isinstance(item, BaseException):
+                raise item
+
+            text, finished = item
+            yield text, finished
+            if finished:
+                break
 
         # Ensure gen_task completes
         await gen_task
+
