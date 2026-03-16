@@ -5,4 +5,4 @@
 # Virtual environment
 .venv/
 winllm.egg-info/
-documentation/
+//documentation/
