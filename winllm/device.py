@@ -5,9 +5,16 @@ from __future__ import annotations
 import logging
 import platform
 import os
+import json
+from pathlib import Path
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
 
 logger = logging.getLogger(__name__)
 
@@ -33,76 +40,6 @@ class GPUInfo:
             return "laptop"      # RTX 4070M (8GB), 4060M, etc.
 
 
-class HardwareProfile(str, Enum):
-    """Hardware tier classification."""
-    CPU_ONLY = "cpu_only"
-    LAPTOP = "laptop"           # 1 GPU, ≤12GB VRAM
-    DESKTOP = "desktop"         # 1 GPU, 12-24GB VRAM
-    WORKSTATION = "workstation" # 1-2 GPUs, 24-48GB each
-    DATACENTER = "datacenter"   # 1-8+ GPUs, 40-141GB each
-
-
-@dataclass
-class HardwareDefaults:
-    """Auto-tuned defaults for a hardware profile."""
-    default_quantization: str       # "4bit", "8bit", "none"
-    max_batch_size: int
-    max_model_len: int
-    device_map_strategy: str        # "auto", "balanced", "sequential"
-    tensor_parallel_size: int
-    gpu_memory_utilization: float
-    kv_cache_fraction: float
-
-
-# --- Profile defaults ---
-PROFILE_DEFAULTS: dict[HardwareProfile, HardwareDefaults] = {
-    HardwareProfile.CPU_ONLY: HardwareDefaults(
-        default_quantization="4bit",
-        max_batch_size=1,
-        max_model_len=2048,
-        device_map_strategy="auto",
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.0,
-        kv_cache_fraction=0.3,
-    ),
-    HardwareProfile.LAPTOP: HardwareDefaults(
-        default_quantization="4bit",
-        max_batch_size=1,
-        max_model_len=4096,
-        device_map_strategy="auto",
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.90,
-        kv_cache_fraction=0.4,
-    ),
-    HardwareProfile.DESKTOP: HardwareDefaults(
-        default_quantization="none",
-        max_batch_size=8,
-        max_model_len=8192,
-        device_map_strategy="auto",
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.90,
-        kv_cache_fraction=0.5,
-    ),
-    HardwareProfile.WORKSTATION: HardwareDefaults(
-        default_quantization="none",
-        max_batch_size=16,
-        max_model_len=16384,
-        device_map_strategy="balanced",
-        tensor_parallel_size=1,  # Updated to GPU count at runtime
-        gpu_memory_utilization=0.90,
-        kv_cache_fraction=0.5,
-    ),
-    HardwareProfile.DATACENTER: HardwareDefaults(
-        default_quantization="none",
-        max_batch_size=64,
-        max_model_len=32768,
-        device_map_strategy="balanced",
-        tensor_parallel_size=1,  # Updated to GPU count at runtime
-        gpu_memory_utilization=0.92,
-        kv_cache_fraction=0.6,
-    ),
-}
-
 
 @dataclass
 class DeviceInfo:
@@ -111,9 +48,9 @@ class DeviceInfo:
     device_count: int                    # Number of GPUs (0 for CPU)
     devices: list[GPUInfo] = field(default_factory=list)
     total_vram_gb: float = 0.0
+    total_cpu_ram_gb: float = 0.0
     platform: str = ""                   # "windows", "linux", "darwin"
-    profile: HardwareProfile = HardwareProfile.CPU_ONLY
-    defaults: HardwareDefaults = field(default_factory=lambda: PROFILE_DEFAULTS[HardwareProfile.CPU_ONLY])
+    defaults: Optional['HardwareDefaults'] = None
 
     @staticmethod
     def detect() -> DeviceInfo:
@@ -121,16 +58,21 @@ class DeviceInfo:
         import torch
 
         system_platform = platform.system().lower()
+        
+        ram_gb = 0.0
+        if psutil:
+            ram_gb = round(psutil.virtual_memory().total / (1024**3), 2)
+
         info = DeviceInfo(
             device_type="cpu",
             device_count=0,
             platform=system_platform,
+            total_cpu_ram_gb=ram_gb,
         )
 
         if not torch.cuda.is_available():
             logger.info("No CUDA GPUs detected — running in CPU-only mode")
-            info.profile = HardwareProfile.CPU_ONLY
-            info.defaults = PROFILE_DEFAULTS[HardwareProfile.CPU_ONLY]
+            info.defaults = _build_defaults(info)
             return info
 
         info.device_type = "cuda"
@@ -149,13 +91,12 @@ class DeviceInfo:
 
         info.total_vram_gb = round(info.total_vram_gb, 2)
 
-        # Classify profile
-        info.profile = _classify_profile(info)
+        # Set dynamic allocation
         info.defaults = _build_defaults(info)
 
         logger.info(
-            "Hardware detected: %d GPU(s), %.1f GB total VRAM, profile=%s, platform=%s",
-            info.device_count, info.total_vram_gb, info.profile.value, info.platform,
+            "Hardware detected: %d GPU(s), %.1f GB total VRAM, platform=%s",
+            info.device_count, info.total_vram_gb, info.platform,
         )
         for gpu in info.devices:
             logger.info(
@@ -172,10 +113,10 @@ class DeviceInfo:
             "device_type": self.device_type,
             "device_count": self.device_count,
             "total_vram_gb": self.total_vram_gb,
+            "total_cpu_ram_gb": self.total_cpu_ram_gb,
             "platform": self.platform,
-            "profile": self.profile.value,
             "gpus": [
-                {"index": g.index, "name": g.name, "vram_gb": g.total_vram_gb}
+                {"index": g.index, "name": g.name, "vram_gb": g.total_vram_gb, "compute_capability": g.compute_capability}
                 for g in self.devices
             ],
             "defaults": {
@@ -183,44 +124,82 @@ class DeviceInfo:
                 "max_batch_size": self.defaults.max_batch_size,
                 "max_model_len": self.defaults.max_model_len,
                 "tensor_parallel_size": self.defaults.tensor_parallel_size,
+                "attention_backend": self.defaults.attention_backend,
             },
         }
 
 
-def _classify_profile(info: DeviceInfo) -> HardwareProfile:
-    """Classify hardware into a profile tier."""
-    if info.device_count == 0:
-        return HardwareProfile.CPU_ONLY
 
-    max_vram = max(g.total_vram_gb for g in info.devices)
+def _apply_env_overrides(defaults: HardwareDefaults) -> HardwareDefaults:
+    """Apply environment variable overrides to HardwareDefaults."""
+    mapping = {
+        "WINLLM_QUANTIZATION": ("default_quantization", str),
+        "WINLLM_MAX_BATCH_SIZE": ("max_batch_size", int),
+        "WINLLM_MAX_MODEL_LEN": ("max_model_len", int),
+        "WINLLM_DEVICE_MAP": ("device_map_strategy", str),
+        "WINLLM_TP_SIZE": ("tensor_parallel_size", int),
+        "WINLLM_GPU_UTILIZATION": ("gpu_memory_utilization", float),
+        "WINLLM_KV_FRACTION": ("kv_cache_fraction", float),
+        "WINLLM_ATTENTION_BACKEND": ("attention_backend", str),
+    }
 
-    if info.device_count >= 2 and max_vram >= 40:
-        return HardwareProfile.DATACENTER
-    elif max_vram >= 40:
-        return HardwareProfile.DATACENTER
-    elif info.device_count >= 2 and max_vram >= 24:
-        return HardwareProfile.WORKSTATION
-    elif max_vram >= 16:
-        return HardwareProfile.DESKTOP
-    else:
-        return HardwareProfile.LAPTOP
+    for env_var, (field_name, type_func) in mapping.items():
+        val = os.environ.get(env_var)
+        if val is not None:
+            try:
+                setattr(defaults, field_name, type_func(val))
+                logger.info("Overridden %s with %s (via %s)", field_name, val, env_var)
+            except ValueError:
+                logger.warning("Failed to parse %s from %s as %s", val, env_var, type_func.__name__)
+                
+    return defaults
 
+
+@dataclass
+class HardwareDefaults:
+    """Auto-tuned defaults mathematically calculated from hardware."""
+    default_quantization: str       # "4bit", "8bit", "none"
+    max_batch_size: int
+    max_model_len: int
+    device_map_strategy: str        # "auto", "balanced", "sequential"
+    tensor_parallel_size: int
+    gpu_memory_utilization: float
+    kv_cache_fraction: float
+    attention_backend: str = "sdpa" # "sdpa", "flash_attention_2", "eager"
 
 def _build_defaults(info: DeviceInfo) -> HardwareDefaults:
-    """Build auto-tuned defaults from profile + actual hardware."""
-    defaults = HardwareDefaults(**vars(PROFILE_DEFAULTS[info.profile]))
+    """Build auto-tuned defaults dynamically from actual hardware."""
+    if info.device_type == "cpu" or info.device_count == 0:
+        defaults = HardwareDefaults(
+            default_quantization="4bit",
+            max_batch_size=1,
+            max_model_len=2048,
+            device_map_strategy="auto",
+            tensor_parallel_size=1,
+            gpu_memory_utilization=0.0,
+            kv_cache_fraction=0.3,
+            attention_backend="sdpa"
+        )
+        return _apply_env_overrides(defaults)
 
-    # Set tensor parallel to GPU count for multi-GPU setups
-    if info.device_count > 1 and info.profile in (
-        HardwareProfile.WORKSTATION, HardwareProfile.DATACENTER
-    ):
-        defaults.tensor_parallel_size = info.device_count
+    # Dynamic Allocation Math
+    defaults = HardwareDefaults(
+        default_quantization="4bit" if info.total_vram_gb < 16 else "none",
+        max_batch_size=max(1, int(info.total_vram_gb / 1.5)), # Scaled dynamically
+        max_model_len=8192 if info.total_vram_gb >= 24 else (4096 if info.total_vram_gb >= 12 else 2048),
+        device_map_strategy="balanced" if info.device_count > 1 else "auto",
+        tensor_parallel_size=info.device_count,
+        gpu_memory_utilization=0.90, # Keep VRAM allowance high for Pooled allocation
+        kv_cache_fraction=0.90,      # Pre-allocate 90% of REMAINING free vram to pool
+        attention_backend="sdpa"
+    )
 
-    # Adjust batch size based on total VRAM
-    if info.total_vram_gb >= 200:
-        defaults.max_batch_size = min(128, defaults.max_batch_size * 2)
+    # Auto-detect attention backend based on compute capability
+    min_compute = min(g.compute_capability for g in info.devices)
+    if min_compute >= (8, 0):
+        defaults.attention_backend = "flash_attention_2"
 
-    return defaults
+    return _apply_env_overrides(defaults)
 
 
 def get_all_gpu_memory_info() -> list[dict[str, float]]:

@@ -39,10 +39,6 @@ def apply_temperature(logits: torch.Tensor, temperature: float) -> torch.Tensor:
 def apply_top_k(logits: torch.Tensor, top_k: int) -> torch.Tensor:
     """Keep only top-k logits, set rest to -inf."""
     if top_k <= 0 or top_k >= logits.shape[-1]:
-        return logits
-
-    top_k_values, _ = torch.topk(logits, top_k, dim=-1)
-    min_top_k = top_k_values[:, -1].unsqueeze(-1)
     logits = torch.where(logits < min_top_k, torch.tensor(float("-inf"), device=logits.device), logits)
     return logits
 
@@ -65,7 +61,7 @@ def apply_top_p(logits: torch.Tensor, top_p: float) -> torch.Tensor:
 
 
 def sample_token(
-    logits: torch.Tensor,
+    logits: torch.Tensor, 
     params: SamplingParams,
     generated_ids: list[int] | None = None,
     generator: torch.Generator | None = None,

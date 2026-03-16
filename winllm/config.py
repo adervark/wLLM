@@ -35,6 +35,7 @@ class ModelConfig:
     tensor_parallel_size: int = 1           # Number of GPUs for tensor parallelism
     device_map_strategy: str = "auto"       # "auto", "balanced", "balanced_low_0", "sequential"
     cpu_offload: bool = False               # Offload layers to CPU if they don't fit in VRAM
+    attention_backend: str = "auto"         # "auto", "sdpa", "flash_attention_2", "eager"
 
     @property
     def torch_dtype(self):
@@ -62,6 +63,8 @@ class ModelConfig:
             self.tensor_parallel_size = defaults.tensor_parallel_size
         if self.device_map_strategy == "auto":
             self.device_map_strategy = defaults.device_map_strategy
+        if self.attention_backend == "auto" and hasattr(defaults, "attention_backend"):
+            self.attention_backend = defaults.attention_backend
         self.gpu_memory_utilization = defaults.gpu_memory_utilization
 
         # 2. Attempt to identify model profile and apply heuristics

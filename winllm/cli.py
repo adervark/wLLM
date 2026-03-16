@@ -39,6 +39,7 @@ def _add_common_model_args(parser):
     parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
     parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
     parser.add_argument("--max-model-len", type=int, default=None, help="Auto-detected if not specified")
+    parser.add_argument("--attention-backend", choices=["auto", "sdpa", "flash_attention_2", "eager"], default="auto", help="Attention backend to use")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
 
@@ -63,6 +64,7 @@ def _build_model_config(args):
     kwargs["device_map_strategy"] = args.device_map_strategy
     kwargs["cpu_offload"] = args.cpu_offload
     kwargs["device"] = args.device
+    kwargs["attention_backend"] = getattr(args, "attention_backend", "auto")
 
     return ModelConfig(**kwargs)
 
@@ -73,7 +75,6 @@ def _apply_auto_config(model_config, scheduler_config, kv_cache_config):
     hw = DeviceInfo.detect()
 
     print(f"\n  Detected: {hw.device_count} GPU(s), {hw.total_vram_gb} GB total VRAM")
-    print(f"     Profile:  {hw.profile.value}")
     for gpu in hw.devices:
         print(f"     GPU {gpu.index}: {gpu.name} ({gpu.total_vram_gb} GB)")
 
@@ -337,11 +338,11 @@ def cmd_detect(args):
         print(f"  No GPUs detected — CPU-only mode")
     else:
         for gpu in hw.devices:
-            print(f"  GPU {gpu.index}: {gpu.name} ({gpu.total_vram_gb} GB)")
+            print(f"  GPU {gpu.index}: {gpu.name} ({gpu.total_vram_gb} GB, Compute {gpu.compute_capability[0]}.{gpu.compute_capability[1]})")
 
-    print(f"\n  Profile:     {hw.profile.value}")
-    print(f"  Platform:    {hw.platform}")
-    print(f"  Total VRAM:  {hw.total_vram_gb}")
+    print(f"\n  Platform:    {hw.platform}")
+    print(f"  CPU RAM:     {hw.total_cpu_ram_gb} GB")
+    print(f"  Total VRAM:  {hw.total_vram_gb} GB")
     
     print(f"\nRecommended defaults:")
     d = hw.defaults
@@ -350,6 +351,7 @@ def cmd_detect(args):
     print(f"  Max context length: {d.max_model_len}")
     print(f"  Tensor parallel:    {d.tensor_parallel_size}")
     print(f"  Device map:         {d.device_map_strategy}")
+    print(f"  Attention backend:  {d.attention_backend}")
     print(f"--------------------------------------------------------------")
 
     if args.json:
