@@ -10,7 +10,9 @@ Built with PyTorch + CUDA + HuggingFace Transformers. Provides an OpenAI-compati
 - **4-bit / 8-bit quantization** via bitsandbytes (NF4, INT8)
 - **KV cache management** — memory-aware scheduling prevents OOM
 - **Streaming** — Server-Sent Events for real-time token output
-- **Continuous batching** — serves multiple concurrent requests
+- **Continuous batching** — serves multiple concurrent requests with iteration-level scheduling
+- **Speculative decoding** — accelerates generation using small draft models
+- **torch.compile support** — reduces Python overhead via graph optimization
 - **Interactive CLI** — chat directly in your terminal
 
 ## Quick Start
@@ -76,11 +78,13 @@ Any HuggingFace `AutoModelForCausalLM` model works. Recommended for 8GB VRAM:
 
 ## Architecture
 
-```
-Request → API Server → Scheduler → Engine → Model (PyTorch/CUDA)
-                           ↕            ↕
-                       Queue/Batch   KV Cache Manager
-```
+Request → API Server → Scheduler (Waiting Queue)
+                           ↓
+                   Inference Loop (Continuous Batching)
+                           ↕               ↕
+                   KV Cache Manager   Speculative Engine
+                           ↓
+                    Model (PyTorch) ← [torch.compile]
 
 ## License
 

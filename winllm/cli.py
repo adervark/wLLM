@@ -39,7 +39,9 @@ def _add_common_model_args(parser):
     parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
     parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
     parser.add_argument("--max-model-len", type=int, default=None, help="Auto-detected if not specified")
+    parser.add_argument("--draft-model", help="Draft model path for speculative decoding")
     parser.add_argument("--attention-backend", choices=["auto", "sdpa", "flash_attention_2", "eager"], default="auto", help="Attention backend to use")
+    parser.add_argument("--compile", action="store_true", help="Use torch.compile to optimize the model")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
 
@@ -55,6 +57,8 @@ def _build_model_config(args):
         kwargs["quantization"] = quantization
     if args.max_model_len is not None:
         kwargs["max_model_len"] = args.max_model_len
+    if hasattr(args, "draft_model") and args.draft_model:
+        kwargs["draft_model_name_or_path"] = args.draft_model
     if args.trust_remote_code:
         kwargs["trust_remote_code"] = True
     if hasattr(args, "gpu_memory_utilization") and args.gpu_memory_utilization is not None:
@@ -65,6 +69,7 @@ def _build_model_config(args):
     kwargs["cpu_offload"] = args.cpu_offload
     kwargs["device"] = args.device
     kwargs["attention_backend"] = getattr(args, "attention_backend", "auto")
+    kwargs["compile"] = getattr(args, "compile", False)
 
     return ModelConfig(**kwargs)
 

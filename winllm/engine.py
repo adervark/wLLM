@@ -55,6 +55,10 @@ class GenerationRequest:
         default_factory=threading.Event, repr=False
     )
 
+    # Internal state for batching
+    _past_key_values: Optional[tuple] = field(default=None, repr=False)
+    _prefix_len: int = field(default=0, repr=False)
+
     def cancel(self):
         """Signal this request to stop generating."""
         self._cancelled.set()
@@ -100,6 +104,7 @@ class InferenceEngine:
         self.model: Optional[PreTrainedModel] = None
         self.tokenizer: Optional[PreTrainedTokenizerBase] = None
         self.kv_cache_manager: Optional[KVCacheManager] = None
+        self.speculative_engine: Optional['SpeculativeEngine'] = None
         self._ready = False
 
     @property
@@ -120,6 +125,25 @@ class InferenceEngine:
                 head_dim=kv_params["head_dim"],
             )
 
+        # Initialize speculative engine if draft model is available
+        if self._loader.draft_model:
+            from .speculative import SpeculativeEngine
+            self.speculative_engine = SpeculativeEngine(
+                target_model=self.model,
+                draft_model=self._loader.draft_model,
+                tokenizer=self.tokenizer
+            )
+            logger.info("Speculative decoding enabled using draft model")
+
+        if self.model_config.compile:
+            logger.info("Compiling model with torch.compile (mode=reduce-overhead)...")
+            try:
+                # Use reduce-overhead to stay within VRAM and avoid too many re-compilations
+                self.model = torch.compile(self.model, mode="reduce-overhead")
+                logger.info("Model compilation scheduled (will occur during first forward pass)")
+            except Exception as e:
+                logger.warning("Failed to compile model: %s. Falling back to eager mode.", e)
+
         self._ready = True
         logger.info("InferenceEngine ready. GPU: %s", get_gpu_memory_info())
 
@@ -139,6 +163,104 @@ class InferenceEngine:
     def decode_tokens(self, token_ids: list[int]) -> str:
         """Decode token IDs to text."""
         return self.tokenizer.decode(token_ids, skip_special_tokens=True)
+
+    @torch.inference_mode()
+    def generate_step(self, requests: list[GenerationRequest]) -> list[GenerationRequest]:
+        """Perform a single inference step for a batch of requests.
+        
+        This handles both prefill for new requests and one decode step 
+        for existing ones. It assumes all requests are on the same device.
+        """
+        if not requests:
+            return []
+
+        try:
+            device = next(self.model.parameters()).device
+        except StopIteration:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Sort requests: prefill vs decode
+        prefill_reqs = [r for r in requests if r._past_key_values is None]
+        decode_reqs = [r for r in requests if r._past_key_values is not None]
+        # 1. Prefill Phase
+        for req in prefill_reqs:
+            if not req.prompt_token_ids:
+                req.prompt_token_ids = self.tokenize(req.prompt)
+            
+            req.started_at = time.time()
+            req.status = RequestStatus.RUNNING
+            
+            input_ids = torch.tensor([req.prompt_token_ids], device=device)
+            outputs = self.model(input_ids, use_cache=True)
+            
+            req._past_key_values = outputs.past_key_values
+            next_logits = outputs.logits[:, -1, :]
+            
+            # Sample first token
+            next_token_id = sample_token(next_logits, req.sampling_params, req.output_token_ids)
+            next_token = next_token_id.item()
+            req.output_token_ids.append(next_token)
+            
+            # Initialize streaming prefix
+            prompt_text = self.tokenizer.decode(req.prompt_token_ids, skip_special_tokens=True)
+            req._prefix_len = len(prompt_text)
+            self._stream_req_token(req)
+
+
+        # 2. Decode Phase (Batched)
+        if decode_reqs:
+            # Prepare batched inputs
+            # NOTE: True batched decoding with different lengths requires padding and attention masks.
+            # However, in iteration-level scheduling, all sequences in the "decode batch" 
+            # have exactly 1 new token input, so we can batch them easily IF the KV cache is handled.
+            
+            # For now, we perform sequential decode steps to ensure stability, 
+            # then we'll vectorize this in Stage 2.1.
+            for req in decode_reqs:
+                if req.is_cancelled:
+                    continue
+                
+                # Use speculative engine if available and only one request is being processed
+                # (Speculative batching is a future enhancement)
+                if self.speculative_engine and len(decode_reqs) == 1:
+                    self.speculative_engine.step(req)
+                    self.kv_cache_manager.extend_sequence(req.request_id, len(req.output_token_ids) - req.generation_tokens)
+                    self._stream_req_token(req)
+                    continue
+
+                last_token = req.output_token_ids[-1]
+                input_ids = torch.tensor([[last_token]], device=device)
+                
+                outputs = self.model(
+                    input_ids,
+                    past_key_values=req._past_key_values,
+                    use_cache=True
+                )
+                
+                req._past_key_values = outputs.past_key_values
+                next_logits = outputs.logits[:, -1, :]
+                
+                next_token_id = sample_token(next_logits, req.sampling_params, req.output_token_ids)
+                next_token = next_token_id.item()
+                req.output_token_ids.append(next_token)
+                
+                self.kv_cache_manager.extend_sequence(req.request_id, 1)
+                self._stream_req_token(req)
+
+        return requests
+
+    def _stream_req_token(self, request: GenerationRequest):
+        """Helper to decode and stream the latest token for a request."""
+        if not request._stream_callback:
+            return
+            
+        full_ids = request.prompt_token_ids + request.output_token_ids
+        current_text = self.tokenizer.decode(full_ids, skip_special_tokens=True)
+        
+        if len(current_text) > request._prefix_len:
+            new_text = current_text[request._prefix_len:]
+            request._stream_callback(new_text, False)
+            request._prefix_len = len(current_text)
 
     @torch.inference_mode()
     def generate(self, request: GenerationRequest) -> GenerationRequest:

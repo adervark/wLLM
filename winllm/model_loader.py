@@ -91,6 +91,7 @@ class ModelLoader:
         self.config = config
         self.model: Optional[PreTrainedModel] = None
         self.tokenizer: Optional[PreTrainedTokenizerBase] = None
+        self.draft_model: Optional[PreTrainedModel] = None
 
     def load(self) -> tuple[PreTrainedModel, PreTrainedTokenizerBase]:
         """Load model and tokenizer. Returns (model, tokenizer)."""
@@ -166,6 +167,18 @@ class ModelLoader:
         # Extract model architecture info for KV cache estimation
         kv_params = _extract_model_kv_params(self.model)
         logger.info("Model KV params: %s", kv_params)
+
+        # --- Load draft model if specified ---
+        if self.config.draft_model_name_or_path:
+            logger.info("Loading draft model '%s' for speculative decoding", self.config.draft_model_name_or_path)
+            # Draft models are usually loaded without quantization and on the same device
+            self.draft_model = AutoModelForCausalLM.from_pretrained(
+                self.config.draft_model_name_or_path,
+                torch_dtype=self.config.torch_dtype,
+                device_map=device_map,
+                trust_remote_code=self.config.trust_remote_code
+            )
+            self.draft_model.eval()
 
         return self.model, self.tokenizer
 

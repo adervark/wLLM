@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
@@ -63,8 +64,15 @@ class Scheduler:
         self._completed: dict[str, tuple[float, GenerationRequest]] = {}  # req_id -> (finished_time, request)
 
         # Concurrency control
-        self._semaphore = asyncio.Semaphore(self.config.max_batch_size)
         self._lock = asyncio.Lock()
+        self._loop_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self._new_request_event = threading.Event()
+        
+        # Track active/pending requests
+        self._active_reqs: list[GenerationRequest] = []
+        
+        self._start_loop()
 
         logger.info(
             "Scheduler initialized: max_batch_size=%d, max_waiting=%d",
@@ -80,9 +88,100 @@ class Scheduler:
     def num_running(self) -> int:
         return len(self._running)
 
+    def _start_loop(self):
+        """Start the background inference loop thread."""
+        self._loop_thread = threading.Thread(target=self._run_inference_loop, daemon=True)
+        self._loop_thread.start()
+
+    def _run_inference_loop(self):
+        """Main inference loop running in a background thread."""
+        logger.info("Inference loop started")
+        
+        while not self._stop_event.is_set():
+            # Wait for requests if none are running
+            if not self._active_reqs:
+                self._new_request_event.wait(timeout=0.1)
+                self._new_request_event.clear()
+
+            # 1. Admit new requests from waiting queue
+            while len(self._active_reqs) < self.config.max_batch_size and self._waiting:
+                req = self._waiting.popleft()
+                
+                # Check KV cache admission
+                prompt_len = len(req.prompt_token_ids)
+                max_new = req.sampling_params.max_tokens
+                if self.engine.kv_cache_manager.can_allocate(prompt_len + max_new):
+                    self.engine.kv_cache_manager.allocate_sequence(req.request_id, prompt_len)
+                    self._active_reqs.append(req)
+                    logger.debug("Admitted request %s to batch", req.request_id)
+                else:
+                    # In a more complex scheduler, we might keep it in waiting,
+                    # but here we fail it if it can't fit even when batch is empty.
+                    if not self._active_reqs:
+                        req.status = RequestStatus.FAILED
+                        req.error = "Request too large for KV cache"
+                        self._handle_completed(req)
+                    else:
+                        # Put back in waiting to try later
+                        self._waiting.appendleft(req)
+                        break
+
+            if not self._active_reqs:
+                continue
+
+            # 2. Run one inference step
+            try:
+                self.engine.generate_step(self._active_reqs)
+            except Exception as e:
+                logger.exception("Error in inference step")
+                # Fail all active requests in the batch if a global error occurred
+                for req in self._active_reqs:
+                    req.status = RequestStatus.FAILED
+                    req.error = str(e)
+                
+            # 3. Check for finished/cancelled requests
+            finished = []
+            for req in self._active_reqs:
+                # Check EOS, Max Tokens, or Cancellation
+                is_eos = req.output_token_ids[-1] == self.engine.tokenizer.eos_token_id
+                is_max = len(req.output_token_ids) >= req.sampling_params.max_tokens
+                
+                if is_eos or is_max or req.is_cancelled:
+                    if not req.is_cancelled:
+                        req.status = RequestStatus.COMPLETED
+                    else:
+                        req.status = RequestStatus.CANCELLED
+                    
+                    req.finished_at = time.time()
+                    req.output_text = self.engine.decode_tokens(req.output_token_ids)
+                    
+                    # Signal stream end
+                    if req._stream_callback:
+                        req._stream_callback("", True)
+                        
+                    finished.append(req)
+
+            # 4. Cleanup finished/failed requests
+            for req in finished:
+                self._active_reqs.remove(req)
+                self.engine.kv_cache_manager.free_sequence(req.request_id)
+                self._handle_completed(req)
+
+    def _handle_completed(self, request: GenerationRequest):
+        """Update stats and move request to completed dict."""
+        # Use a thread-safe way to update shared state if necessary
+        # For now, we assume _completed is only read by async tasks
+        self._completed[request.request_id] = (time.time(), request)
+        
+        if request.status == RequestStatus.COMPLETED:
+            self.stats.completed_requests += 1
+            self.stats.total_generation_tokens += request.generation_tokens
+            self.stats.total_generation_time += request.elapsed
+        elif request.status == RequestStatus.FAILED:
+            self.stats.failed_requests += 1
+
     async def submit(self, request: GenerationRequest) -> GenerationRequest:
         """Submit a request for generation. Blocks until completion."""
-        # Check queue limits
         if len(self._waiting) >= self.config.max_waiting_requests:
             request.status = RequestStatus.FAILED
             request.error = "Server overloaded — request queue full"
@@ -90,85 +189,26 @@ class Scheduler:
 
         self.stats.total_requests += 1
 
-        # Tokenize early so we know the prompt length
         if not request.prompt_token_ids:
             request.prompt_token_ids = self.engine.tokenize(request.prompt)
 
         self.stats.total_prompt_tokens += len(request.prompt_token_ids)
 
-        # Wait for a slot
-        async with self._semaphore:
-            async with self._lock:
-                self._running[request.request_id] = request
+        # Add to waiting queue
+        self._waiting.append(request)
+        self._new_request_event.set()
 
-            try:
-                # Run generation in thread pool (model inference is blocking)
-                loop = asyncio.get_running_loop()
-                result = await loop.run_in_executor(
-                    None, self.engine.generate, request
-                )
-            except Exception as e:
-                request.status = RequestStatus.FAILED
-                request.error = str(e)
-                result = request
-            finally:
-                async with self._lock:
-                    self._running.pop(request.request_id, None)
-                    self._completed[request.request_id] = (time.time(), result)
-                    self._evict_completed()
+        # Wait for completion
+        while request.status in (RequestStatus.PENDING, RequestStatus.RUNNING):
+            await asyncio.sleep(0.05)
 
-            # Update stats
-            if result.status == RequestStatus.COMPLETED:
-                self.stats.completed_requests += 1
-                self.stats.total_generation_tokens += result.generation_tokens
-                self.stats.total_generation_time += result.elapsed
-            else:
-                self.stats.failed_requests += 1
-
-            return result
+        return request
 
     async def submit_streaming(self, request: GenerationRequest):
-        """Submit a request and stream tokens via the request's callback.
-
-        Returns the completed request.
-        """
-        # Same flow as submit but uses generate_stream
-        if len(self._waiting) >= self.config.max_waiting_requests:
-            request.status = RequestStatus.FAILED
-            request.error = "Server overloaded — request queue full"
-            return request
-
-        self.stats.total_requests += 1
-
-        if not request.prompt_token_ids:
-            request.prompt_token_ids = self.engine.tokenize(request.prompt)
-
-        self.stats.total_prompt_tokens += len(request.prompt_token_ids)
-
-        async with self._semaphore:
-            async with self._lock:
-                self._running[request.request_id] = request
-
-            try:
-                async for _text, _finished in self.engine.generate_stream(request):
-                    pass  # The stream callback on the request handles output
-            except Exception as e:
-                request.status = RequestStatus.FAILED
-                request.error = str(e)
-            finally:
-                async with self._lock:
-                    self._running.pop(request.request_id, None)
-                    self._completed[request.request_id] = (time.time(), request)
-                    self._evict_completed()
-
-            if request.status == RequestStatus.COMPLETED:
-                self.stats.completed_requests += 1
-                self.stats.total_generation_tokens += request.generation_tokens
-                self.stats.total_generation_time += request.elapsed
-            else:
-                self.stats.failed_requests += 1
-
-            return request
+        """Submit a request and stream tokens via the request's callback."""
+        # Same flow as submit but returns once the background loop starts processing it
+        # Actually, for consistency, we wait until it's finished.
+        return await self.submit(request)
 
     def get_request(self, request_id: str) -> Optional[GenerationRequest]:
         """Get a request by ID from any queue."""
