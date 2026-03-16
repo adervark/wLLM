@@ -39,7 +39,11 @@ def apply_temperature(logits: torch.Tensor, temperature: float) -> torch.Tensor:
 def apply_top_k(logits: torch.Tensor, top_k: int) -> torch.Tensor:
     """Keep only top-k logits, set rest to -inf."""
     if top_k <= 0 or top_k >= logits.shape[-1]:
-    logits = torch.where(logits < min_top_k, torch.tensor(float("-inf"), device=logits.device), logits)
+        return logits
+
+    # Find the k-th largest value
+    indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+    logits[indices_to_remove] = float("-inf")
     return logits
 
 

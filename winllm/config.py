@@ -25,6 +25,7 @@ class DType(str, Enum):
 class ModelConfig:
     """Configuration for model loading."""
     model_name_or_path: str
+    draft_model_name_or_path: Optional[str] = None # Optional small model for speculative decoding
     quantization: QuantizationType = QuantizationType.NF4
     dtype: DType = DType.FLOAT16
     max_model_len: int = 4096
@@ -36,6 +37,7 @@ class ModelConfig:
     device_map_strategy: str = "auto"       # "auto", "balanced", "balanced_low_0", "sequential"
     cpu_offload: bool = False               # Offload layers to CPU if they don't fit in VRAM
     attention_backend: str = "auto"         # "auto", "sdpa", "flash_attention_2", "eager"
+    compile: bool = False                   # Use torch.compile for faster inference
 
     @property
     def torch_dtype(self):
