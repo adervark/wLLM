@@ -68,7 +68,7 @@ def cmd_list(args):
 
     header_model = "MODEL".ljust(name_width)
     print(f"\n  {header_model}   {'SIZE':>10}   {'MODIFIED':>16}")
-    print(f"  {'─' * name_width}   {'─' * 10}   {'─' * 16}")
+    print(f"  {'-' * name_width}   {'-' * 10}   {'-' * 16}")
 
     total_size = 0
     for name, size_bytes, modified in models:

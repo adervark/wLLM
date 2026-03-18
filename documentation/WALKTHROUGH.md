@@ -159,25 +159,38 @@ If you want to contribute or modify WinLLM, here is a quick overview of the inne
 ### Project Structure
 ```
 S:\Code\wLLM\
-├── pyproject.toml
-├── README.md
-├── winllm/
-│   ├── __init__.py / __main__.py
-│   ├── config.py           # All configs + apply_hardware_defaults()
-│   ├── device.py           # HW detection, dynamic allocation, env overrides
-│   ├── registry.py         # Model family detection & auto-tuning
-│   ├── model_loader.py     # Multi-GPU device_map + tensor parallelism
-│   ├── kv_cache.py         # Model-aware KV estimation, aggregate VRAM
-│   ├── sampler.py          # Token sampling pipeline
-│   ├── engine.py           # Inference (multi-GPU device resolution)
-│   ├── scheduler.py        # Async request queue + batching
-│   ├── api_server.py       # FastAPI OpenAI-compatible server
-│   ├── speculative.py      # Speculative decoding implementation
-│   └── cli.py              # serve / chat / benchmark / detect
-└── tests/
-    ├── benchmark_throughput.py # Performance comparison tool
-    ├── test_sampler.py
-    └── test_kv_cache.py
++-- pyproject.toml
++-- README.md
++-- winllm/
+|   +-- __init__.py / __main__.py
+|   +-- config.py           # All config dataclasses + apply_hardware_defaults()
+|   +-- device.py           # HW detection, dynamic allocation, env overrides
+|   +-- registry.py         # Model family detection and auto-tuning
+|   +-- model_loader.py     # Quantization, multi-GPU device_map, tensor parallelism
+|   +-- kv_cache.py         # Block-based KV cache allocation and memory tracking
+|   +-- sampler.py          # Token sampling pipeline (temperature, top-k, top-p)
+|   +-- engine.py           # Core inference: prefill, decode loop, streaming
+|   +-- scheduler.py        # Async request queue, continuous batching, prefix caching
+|   +-- api_server.py       # FastAPI OpenAI-compatible REST server
+|   +-- speculative.py      # Speculative decoding (draft/verify/accept)
+|   +-- cli.py              # CLI entry point: serve / chat / benchmark / list / detect
+|   +-- types.py            # Shared data types (GenerationRequest, RequestStatus)
+|   +-- utils.py            # Chat prompt formatting utilities
+|   +-- commands/           # CLI command implementations
+|       +-- serve.py / chat.py / benchmark.py / list.py / detect.py / common.py
++-- tests/
+|   +-- test_config.py      # Config validation and defaults
+|   +-- test_device.py      # Hardware detection and profiling
+|   +-- test_kv_cache.py    # KV cache allocation and block management
+|   +-- test_registry.py    # Model family identification
+|   +-- test_sampler.py     # Logits processing and sampling
+|   +-- test_utils.py       # Chat prompt formatting
+|   +-- benchmark_throughput.py  # Performance comparison tool
++-- documentation/
+    +-- Architecture.md     # System architecture diagrams
+    +-- COMMANDS.md         # CLI reference
+    +-- WALKTHROUGH.md      # This file
+    +-- CHANGELOG.md        # Version history
 ```
 
 ### Key Files in Detail
@@ -186,11 +199,13 @@ S:\Code\wLLM\
 |------|---------|
 | `device.py` | Runs `DeviceInfo.detect()` and `_build_defaults()` to calculate optimal parameters from your actual VRAM. |
 | `registry.py` | Auto-detects model family (Llama, Mistral, Qwen, Gemma) and applies family-specific tuning. |
-| `config.py` | Handles `tensor_parallel_size`, `device_map_strategy`, `cpu_offload`, `attention_backend` and dynamic KV limits. |
-| `model_loader.py` | Responsible for multi-GPU distribution (`device_map`), CPU layer offloading, and model architecture introspection. |
-| `kv_cache.py` | Calculates model-aware per-token cache usage mathematically, preventing unnecessary OOM errors by capping sequence bounds dynamically. |
-| `engine.py` | Main event loop. Figures out tensor placement (`next(model.parameters())`) and injects KV params into PyTorch model layers. |
-| `speculative.py` | Implements draft-model proposal and target-model verification logic. |
-| `cli.py` | Captures arguments: `--tp`, `--compile`, `--draft-model`, `--attention-backend`. |
+| `config.py` | Centralizes all dataclasses: `ModelConfig`, `SchedulerConfig`, `KVCacheConfig`, `SamplingParams`. |
+| `model_loader.py` | Builds quantization configs, handles multi-GPU distribution (`device_map`), CPU offloading, and model architecture introspection. |
+| `kv_cache.py` | Calculates model-aware per-token cache usage mathematically, preventing OOM errors by capping allocations dynamically. |
+| `engine.py` | Core inference loop. Orchestrates prefill and decode via decomposed helpers: `_validate_prompt`, `_run_decode_loop`, `_finalize_generation`, etc. |
+| `scheduler.py` | Background inference loop with continuous batching. Handles KV admission, prefix caching (`_try_promote_prefix_cache`), and request lifecycle. |
+| `speculative.py` | Three-phase speculative decoding: `_draft_proposals` generates candidates, `_verify_proposals` checks them, `_accept_or_reject` resolves mismatches. |
+| `types.py` | Shared data types: `GenerationRequest` (tracks request state, tokens, KV cache) and `RequestStatus` enum. |
+| `cli.py` | Parses CLI arguments and dispatches to command handlers in `commands/`. |
 
 Enjoy building locally and taking full control of your LLMs with **WinLLM**!

@@ -1,15 +1,42 @@
+"""Speculative decoding engine for faster token generation.
+
+Speculative decoding uses a small, fast "draft" model to propose multiple
+tokens at once, then verifies them all with the large "target" model in
+a single forward pass. When the draft model guesses correctly (which is
+common for simple/predictable tokens), this can generate multiple tokens
+per forward pass of the target model.
+
+How it works:
+  1. Draft model generates N candidate tokens autoregressively.
+  2. Target model processes all N candidates in ONE forward pass.
+  3. We compare: accept matching tokens, reject at the first mismatch.
+  4. If all N matched, we bonus-sample one extra token from the target.
+"""
+
+from __future__ import annotations
+
 import torch
 from typing import Optional, List
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
-from .engine import GenerationRequest, sample_token
+
+from .types import GenerationRequest
+from .sampler import sample_token
+
 
 class SpeculativeEngine:
-    """Implements speculative decoding logic."""
-    
+    """Implements speculative decoding logic.
+
+    Args:
+        target_model: The large, accurate model used for verification.
+        draft_model: The small, fast model used for proposing tokens.
+        tokenizer: Shared tokenizer (must be compatible with both models).
+        num_speculative_tokens: How many tokens to draft per step.
+    """
+
     def __init__(
-        self, 
-        target_model: PreTrainedModel, 
-        draft_model: PreTrainedModel, 
+        self,
+        target_model: PreTrainedModel,
+        draft_model: PreTrainedModel,
         tokenizer: PreTrainedTokenizerBase,
         num_speculative_tokens: int = 4
     ):
@@ -22,76 +49,93 @@ class SpeculativeEngine:
     @torch.inference_mode()
     def step(self, request: GenerationRequest) -> bool:
         """Perform one speculative decoding step for a single request.
-        
-        Returns True if the request should continue generating, False if it's finished.
+
+        Returns True if the request should continue generating, False if it hit EOS.
         """
-        # 1. Draft model generates N tokens
+        # --- Phase 1: Draft model proposes N tokens ---
+        draft_tokens = self._draft_proposals(request)
+
+        # --- Phase 2: Target model verifies all proposals at once ---
+        target_logits = self._verify_proposals(request, draft_tokens)
+
+        # --- Phase 3: Accept or reject each proposed token ---
+        return self._accept_or_reject(request, draft_tokens, target_logits)
+
+    def _draft_proposals(self, request: GenerationRequest) -> list[int]:
+        """Use the draft model to quickly generate candidate tokens."""
         draft_tokens = []
-        current_past_key_values_draft = request._draft_past_key_values if hasattr(request, '_draft_past_key_values') else None
-        
-        # We need to maintain separate KV caches for draft and target
-        # For simplicity in this implementation, we use the model's internal cache
-        
         last_token = request.output_token_ids[-1]
-        
-        # Proposal loop
         proposal_input_ids = torch.tensor([[last_token]], device=self.device)
         temp_past_draft = request._draft_past_key_values
-        
+
         for _ in range(self.num_speculative_tokens):
-            outputs = self.draft_model(proposal_input_ids, past_key_values=temp_past_draft, use_cache=True)
+            outputs = self.draft_model(
+                proposal_input_ids, past_key_values=temp_past_draft, use_cache=True
+            )
             temp_past_draft = outputs.past_key_values
-            
+
             next_logits = outputs.logits[:, -1, :]
-            next_token_id = sample_token(next_logits, request.sampling_params, request.output_token_ids + draft_tokens)
+            next_token_id = sample_token(
+                next_logits, request.sampling_params,
+                request.output_token_ids + draft_tokens
+            )
             next_token = next_token_id.item()
-            
             draft_tokens.append(next_token)
             proposal_input_ids = next_token_id.unsqueeze(0)
-            
+
+            # Stop drafting if we hit EOS
             if next_token == self.tokenizer.eos_token_id:
                 break
 
-        # 2. Target model verifies proposals in a single forward pass
-        # Input to target: [last_token] + draft_tokens
+        return draft_tokens
+
+    def _verify_proposals(self, request: GenerationRequest, draft_tokens: list[int]) -> torch.Tensor:
+        """Run the target model on all proposed tokens in one forward pass."""
+        last_token = request.output_token_ids[-1]
         verify_input_ids = torch.tensor([[last_token] + draft_tokens], device=self.device)
+
         target_outputs = self.target_model(
-            verify_input_ids, 
-            past_key_values=request._past_key_values, 
+            verify_input_ids,
+            past_key_values=request._past_key_values,
             use_cache=True
         )
-        
+
         request._past_key_values = target_outputs.past_key_values
-        target_logits = target_outputs.logits[0, :, :] # (len, vocab)
-        
-        # 3. Acceptance evaluation
-        accepted_count = 0
+        # Shape: (num_draft_tokens + 1, vocab_size)
+        return target_outputs.logits[0, :, :]
+
+    def _accept_or_reject(
+        self, request: GenerationRequest,
+        draft_tokens: list[int], target_logits: torch.Tensor
+    ) -> bool:
+        """Compare draft vs. target predictions, accept matches, reject at first mismatch."""
         for i in range(len(draft_tokens)):
-            # Sample from target model at this position
-            target_token_id = sample_token(target_logits[i:i+1, :], request.sampling_params, request.output_token_ids)
+            # Sample what the target model would have chosen at position i
+            target_token_id = sample_token(
+                target_logits[i:i+1, :], request.sampling_params, request.output_token_ids
+            )
             target_token = target_token_id.item()
-            
+
             if target_token == draft_tokens[i]:
-                accepted_count += 1
+                # Draft model guessed correctly -- accept this token
                 request.output_token_ids.append(target_token)
                 if target_token == self.tokenizer.eos_token_id:
                     return False
             else:
-                # Mismatch: append the target model's correction and stop verification
+                # Mismatch: use the target model's correction instead
                 request.output_token_ids.append(target_token)
-                # We need to truncate the KV cache of the target model 
-                # because we over-shot with the draft tokens
-                # (This requires a more advanced KV cache manager that supports backtracking)
                 break
         else:
-            # All tokens accepted, append one more from the target model's next prediction
-            last_target_token_id = sample_token(target_logits[-1:, :], request.sampling_params, request.output_token_ids)
+            # All draft tokens accepted -- bonus: sample one more from target
+            last_target_token_id = sample_token(
+                target_logits[-1:, :], request.sampling_params, request.output_token_ids
+            )
             last_target_token = last_target_token_id.item()
             request.output_token_ids.append(last_target_token)
             if last_target_token == self.tokenizer.eos_token_id:
                 return False
 
-        # Update draft KV cache (simplified: just reset for now, or implement backtracking)
-        request._draft_past_key_values = None 
-        
+        # Reset draft KV cache (simplified; a production version would backtrack)
+        request._draft_past_key_values = None
+
         return True

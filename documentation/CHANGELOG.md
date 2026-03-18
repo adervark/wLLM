@@ -4,6 +4,29 @@ All notable changes to WinLLM are documented here.
 
 ---
 
+## [0.4.1] - 2026-03-18
+### Code Clarity and Readability Refactoring
+
+#### Fixed
+- **Missing `import time`** (`engine.py`) -- `time.time()` was used but never imported, causing a runtime crash.
+- **Missing `Optional` import** (`kv_cache.py`) -- `Optional` was used in type hints but never imported from `typing`.
+
+#### Changed
+- **`engine.py`** -- Decomposed the 170-line `_generate_impl` into focused helpers: `_validate_prompt()`, `_allocate_kv_cache()`, `_make_generator()`, `_get_stop_conditions()`, `_run_decode_loop()`, and `_finalize_generation()`. Extracted `_prefill_single_request()` and `_decode_single_request()` from `generate_step()`. Added module docstring with glossary of key concepts (prefill, decode, KV cache). Removed all stale "Stage X" development comments.
+- **`model_loader.py`** -- Merged duplicate functions `_build_quantization_config` and `_get_quantization_config` into a single `_build_quantization_config` covering all quantization methods.
+- **`scheduler.py`** -- Extracted 30-line prefix cache promotion block into `_try_promote_prefix_cache()` method.
+- **`speculative.py`** -- Decomposed `step()` into `_draft_proposals()`, `_verify_proposals()`, and `_accept_or_reject()`. Added `from __future__ import annotations`. Fixed imports to use `.types` and `.sampler` instead of `.engine`.
+- **`registry.py`** -- Replaced f-string logger calls with lazy `%s` formatting.
+- **`device.py`** -- Added clear section header for backward-compatibility aliases.
+- **`.gitignore`** -- Comprehensive rewrite covering Python caches, build artifacts, virtual environments, IDE files, OS generated files, testing artifacts, and torch offload weights. Untracked previously committed `.pyc` files.
+
+#### Removed
+- **Root test scripts** -- Deleted `test_stream.py`, `test_stream_2.py`, and `test_registry.py` (all duplicated by `tests/` or `test_combined.py`).
+
+#### Documentation
+- **`Architecture.md`** -- Updated engine.py and speculative.py sections to reflect decomposed method structure.
+- **`WALKTHROUGH.md`** -- Expanded project structure to list all source files, test files, commands, and documentation. Updated key files table with accurate descriptions.
+
 ## [0.4.0] - 2026-03-16
 ### Added
 - **Prefix Caching**: Physical KV cache storage with block-based hashing. Reduces TTFT for recurring prompts to near-zero.
