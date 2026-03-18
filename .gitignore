@@ -5,3 +5,7 @@ documentation/Genesys.md
 # Virtual environment
 .venv/
 winllm.egg-info/
+
+# Python caching
+**/__pycache__/
+*.py[cod]
