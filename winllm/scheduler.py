@@ -172,7 +172,6 @@ class Scheduler:
             # 3. Check for finished/cancelled requests
             finished = []
             for req in self._active_reqs:
-                # Check EOS, Max Tokens, or Cancellation
                 is_eos = req.output_token_ids[-1] == self.engine.tokenizer.eos_token_id
                 is_max = len(req.output_token_ids) >= req.sampling_params.max_tokens
                 
@@ -193,43 +192,46 @@ class Scheduler:
 
             # 4. Cleanup finished/failed requests
             for req in finished:
-                # Potential promotion to prefix cache if it was long enough and successful
-                if req.status == RequestStatus.COMPLETED:
-                    block_size = self.engine.kv_cache_manager.block_size
-                    prompt_len = len(req.prompt_token_ids)
-                    if prompt_len >= block_size:
-                        # Promote the first block (or more) to prefix cache
-                        # We slice the tensors to only include the prompt part
-                        # past_key_values is ((k,v), (k,v), ...)
-                        # tensor shape is [batch, heads, seq, dim]
-                        prompt_kv = []
-                        for layer_kv in req._past_key_values:
-                            k, v = layer_kv
-                            # Slice to prompt length (index 2 is sequence length)
-                            prompt_kv.append((k[:, :, :prompt_len, :], v[:, :, :prompt_len, :]))
-                        
-                        prompt_kv = tuple(prompt_kv)
-                        
-                        first_block_hash = hash(tuple(req.prompt_token_ids[:block_size]))
-                        # We only promote the first block's tensors for now (exact match)
-                        # We slice the tensors even further to just the first block
-                        first_block_kv = []
-                        for layer_kv in prompt_kv:
-                            k, v = layer_kv
-                            first_block_kv.append((k[:, :, :block_size, :], v[:, :, :block_size, :]))
-                        
-                        self.engine.kv_cache_manager.promote_to_prefix(
-                            first_block_hash, req.request_id, block_size, tuple(first_block_kv)
-                        )
-
+                self._try_promote_prefix_cache(req)
                 self._active_reqs.remove(req)
                 self.engine.kv_cache_manager.free_sequence(req.request_id)
                 self._handle_completed(req)
 
+    def _try_promote_prefix_cache(self, req: GenerationRequest):
+        """Try to save this request's prompt KV tensors in the prefix cache.
+
+        If the prompt is long enough (>= 1 block), we slice out the first
+        block's KV tensors and store them so future requests with the same
+        prefix can skip re-computing those tokens.
+
+        KV cache tensor layout:
+          past_key_values = ((key_layer0, val_layer0), (key_layer1, val_layer1), ...)
+          Each tensor has shape: [batch, num_heads, seq_len, head_dim]
+        """
+        if req.status != RequestStatus.COMPLETED:
+            return
+
+        block_size = self.engine.kv_cache_manager.block_size
+        prompt_len = len(req.prompt_token_ids)
+        if prompt_len < block_size:
+            return
+
+        # Slice each layer's KV tensors to just the first block of the prompt
+        first_block_kv = []
+        for layer_kv in req._past_key_values:
+            k, v = layer_kv
+            first_block_kv.append((
+                k[:, :, :block_size, :],
+                v[:, :, :block_size, :],
+            ))
+
+        first_block_hash = hash(tuple(req.prompt_token_ids[:block_size]))
+        self.engine.kv_cache_manager.promote_to_prefix(
+            first_block_hash, req.request_id, block_size, tuple(first_block_kv)
+        )
+
     def _handle_completed(self, request: GenerationRequest):
         """Update stats and move request to completed dict."""
-        # Use a thread-safe way to update shared state if necessary
-        # For now, we assume _completed is only read by async tasks
         self._completed[request.request_id] = (time.time(), request)
         
         if request.status == RequestStatus.COMPLETED:

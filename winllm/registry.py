@@ -60,7 +60,7 @@ def identify_model_profile(model_name_or_path: str) -> ModelProfile | None:
     
     for profile in KNOWN_MODELS:
         if any(keyword in name_lower for keyword in profile.match_keywords):
-            logger.info(f"Auto-detected model family: {profile.family}")
+            logger.info("Auto-detected model family: %s", profile.family)
             return profile
             
     logger.info("Could not auto-detect model family; falling back to generic defaults.")
@@ -71,11 +71,7 @@ def apply_model_profile(config, profile: ModelProfile):
     from .config import QuantizationType
     
     # Only apply if user hasn't forced a specific quantization
-    # Note: We'll refine this logic when we integrate with hardware detection
     if config.quantization == QuantizationType.NF4 and profile.recommended_quantization == "8bit":
          config.quantization = QuantizationType.INT8
     elif config.quantization == QuantizationType.NF4 and profile.recommended_quantization == "none":
          config.quantization = QuantizationType.NONE
-         
-    # We could also use the profile to set default trust_remote_code
-    # if certain models are known to require it (e.g., phi-3 before it was merged)

@@ -305,7 +305,11 @@ class MemoryUtils:
         }
 
 
-# Aliases for backward compatibility
+# ------------------------------------------------------------------
+# Backward-compatibility aliases
+# ------------------------------------------------------------------
+# These module-level functions are imported by older parts of the codebase
+# (e.g., model_loader.py). New code should use MemoryUtils.xxx() directly.
 get_all_gpu_memory_info = MemoryUtils.get_all_info
 get_total_gpu_memory = MemoryUtils.get_total_vram
 get_gpu_memory_info = MemoryUtils.get_info

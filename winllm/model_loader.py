@@ -1,4 +1,14 @@
-"""Model and tokenizer loading with quantization and multi-GPU support."""
+"""Model and tokenizer loading with quantization and multi-GPU support.
+
+This module handles the heavy lifting of getting a HuggingFace model
+into GPU memory with the right quantization, device mapping, and
+configuration. It supports:
+  - BitsAndBytes quantization (4-bit NF4, 8-bit INT8)
+  - Pre-quantized models (GPTQ, AWQ)
+  - Multi-GPU sharding via device_map
+  - Tensor parallelism
+  - CPU offloading for oversized models
+"""
 
 from __future__ import annotations
 
@@ -21,8 +31,21 @@ from .device import get_all_gpu_memory_info, get_gpu_memory_info, get_aggregate_
 logger = logging.getLogger(__name__)
 
 
-def _build_quantization_config(model_config: ModelConfig) -> Optional[BitsAndBytesConfig]:
-    """Build bitsandbytes quantization config."""
+# ------------------------------------------------------------------
+# Quantization configuration
+# ------------------------------------------------------------------
+
+def _build_quantization_config(model_config: ModelConfig):
+    """Build the appropriate quantization configuration for HF Transformers.
+
+    Handles all supported quantization methods:
+      - NF4 (4-bit via bitsandbytes with double quantization)
+      - INT8 (8-bit via bitsandbytes)
+      - GPTQ (4-bit, uses exllama kernel)
+      - AWQ (4-bit with fused attention)
+
+    Returns None for unquantized models.
+    """
     if model_config.quantization == QuantizationType.NF4:
         return BitsAndBytesConfig(
             load_in_4bit=True,
@@ -30,38 +53,31 @@ def _build_quantization_config(model_config: ModelConfig) -> Optional[BitsAndByt
             bnb_4bit_quant_type="nf4",
             bnb_4bit_use_double_quant=True,
         )
-    elif model_config.quantization == QuantizationType.INT8:
-        return BitsAndBytesConfig(
-            load_in_8bit=True,
-        )
-    return None
 
-def _get_quantization_config(model_config: ModelConfig):
-    """Build the appropriate quantization configuration for HF Transformers."""
-    # bitsandbytes
-    if model_config.quantization in (QuantizationType.NF4, QuantizationType.INT8):
-        return _build_quantization_config(model_config)
-    
-    # GPTQ / AWQ
-    # These often don't need a separate config if the model is already quantized,
-    # but providing one can help configure the kernel.
+    if model_config.quantization == QuantizationType.INT8:
+        return BitsAndBytesConfig(load_in_8bit=True)
+
     if model_config.quantization == QuantizationType.GPTQ:
         from transformers import GPTQConfig
         return GPTQConfig(bits=4, disable_exllama=False)
-    
+
     if model_config.quantization == QuantizationType.AWQ:
         from transformers import AwqConfig
         return AwqConfig(bits=4, fuse_max_seq_len=model_config.max_model_len, do_fuse=True)
-        
+
     return None
 
 
-# GPU memory functions are now in device.py — re-exported here for backward compatibility.
-# get_gpu_memory_info and get_aggregate_gpu_memory are imported above from .device
-
+# ------------------------------------------------------------------
+# Model architecture introspection
+# ------------------------------------------------------------------
 
 def _extract_model_kv_params(model: PreTrainedModel) -> dict:
-    """Extract KV cache dimensions from a loaded model's config."""
+    """Extract KV cache dimensions from a loaded model's config.
+
+    Different model architectures use different config attribute names
+    for the same concept, so we check multiple alternatives.
+    """
     config = model.config
     result = {}
 
@@ -72,21 +88,21 @@ def _extract_model_kv_params(model: PreTrainedModel) -> dict:
             result["num_layers"] = val
             break
 
-    # Number of KV heads (may differ from attention heads in GQA)
+    # Number of KV heads (may differ from attention heads in GQA models)
     for attr in ("num_key_value_heads", "num_kv_heads"):
         val = getattr(config, attr, None)
         if val is not None:
             result["num_kv_heads"] = val
             break
     else:
-        # Fallback to full attention heads
+        # Fallback: use full attention heads (non-GQA models)
         for attr in ("num_attention_heads", "n_head", "num_heads"):
             val = getattr(config, attr, None)
             if val is not None:
                 result["num_kv_heads"] = val
                 break
 
-    # Head dimension
+    # Head dimension (compute from hidden_size if not explicit)
     head_dim = getattr(config, "head_dim", None)
     if head_dim is None:
         hidden_size = getattr(config, "hidden_size", None)
@@ -98,6 +114,10 @@ def _extract_model_kv_params(model: PreTrainedModel) -> dict:
 
     return result
 
+
+# ------------------------------------------------------------------
+# ModelLoader
+# ------------------------------------------------------------------
 
 class ModelLoader:
     """Loads and manages a HuggingFace model with optional quantization.
@@ -134,12 +154,13 @@ class ModelLoader:
             trust_remote_code=self.config.trust_remote_code,
         )
 
+        # Ensure pad_token is set (many models don't have one by default)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         # --- Build quantization config ---
-        quantization_config = _get_quantization_config(self.config)
+        quantization_config = _build_quantization_config(self.config)
 
         # --- Resolve device map ---
         device_map = self._resolve_device_map()
@@ -164,10 +185,10 @@ class ModelLoader:
             except Exception as e:
                 logger.warning("Tensor parallelism not supported: %s", e)
 
-        # CPU offload
+        # CPU offload for models that don't fit entirely in VRAM
         if self.config.cpu_offload:
             load_kwargs["offload_folder"] = "offload_weights"
-            logger.info("CPU offload enabled — excess layers will spill to RAM")
+            logger.info("CPU offload enabled -- excess layers will spill to RAM")
 
         self.model = AutoModelForCausalLM.from_pretrained(**load_kwargs)
         self.model.eval()
@@ -187,10 +208,9 @@ class ModelLoader:
         kv_params = _extract_model_kv_params(self.model)
         logger.info("Model KV params: %s", kv_params)
 
-        # --- Load draft model if specified ---
+        # --- Load draft model for speculative decoding (if specified) ---
         if self.config.draft_model_name_or_path:
             logger.info("Loading draft model '%s' for speculative decoding", self.config.draft_model_name_or_path)
-            # Draft models are usually loaded without quantization and on the same device
             self.draft_model = AutoModelForCausalLM.from_pretrained(
                 self.config.draft_model_name_or_path,
                 torch_dtype=self.config.torch_dtype,
@@ -216,8 +236,7 @@ class ModelLoader:
         elif device == "auto":
             return self.config.device_map_strategy
         elif device.startswith("cuda:"):
-            # Specific GPU
-            return {"": device}
+            return {"": device}  # Pin to a specific GPU
         else:
             return self.config.device_map_strategy
 

@@ -266,11 +266,13 @@ classDiagram
 
 ### [`engine.py`](../winllm/engine.py) | The Batched Inference Engine
 - **`generate_step()`**: The primary entry point for inference. It takes a *list* of requests and performs one iteration of prefill or decode for all of them.
-- **Integrated `torch.compile`**: Supports compiling the forward pass into optimized kernels, significantly improving throughput by reducing Python overhead in the decode iterations.
+- **Decomposed internals**: The main generation pipeline is broken into focused helpers: `_validate_prompt()`, `_allocate_kv_cache()`, `_run_decode_loop()`, and `_finalize_generation()`, making the code easy to follow step by step.
+- **`_prefill_single_request()` / `_decode_single_request()`**: Extracted from `generate_step()` for clarity.
+- **Integrated `torch.compile`**: Supports compiling the forward pass into optimized kernels via `_try_compile_model()`.
 
 ### [`speculative.py`](../winllm/speculative.py) | Accelerated Generation
 - **Draft Model Logic**: Implements speculative decoding where a smaller model proposes tokens that the larger target model verifies in a single forward pass.
-- **Acceptance Loop**: Dynamically adjusts the target model's KV cache and output tokens based on how many "draft" tokens were correct.
+- **Three-phase pipeline**: `_draft_proposals()` generates candidates, `_verify_proposals()` runs target verification in one pass, and `_accept_or_reject()` handles the acceptance loop.
 
 ### [`kv_cache.py`](../winllm/kv_cache.py) | Logical Memory Tracker
 - **Iteration-Level Allocation**: Tracks block usage across the entire batch.
