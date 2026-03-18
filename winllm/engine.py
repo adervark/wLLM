@@ -3,12 +3,7 @@
 from __future__ import annotations
 
 import logging
-import threading
-import time
-import uuid
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import AsyncIterator, Callable, Optional
+from typing import AsyncIterator, Optional, Callable
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
@@ -17,76 +12,9 @@ from .config import ModelConfig, SamplingParams, KVCacheConfig
 from .kv_cache import KVCacheManager
 from .model_loader import ModelLoader, get_gpu_memory_info
 from .sampler import sample_token
+from .types import GenerationRequest, RequestStatus
 
 logger = logging.getLogger(__name__)
-
-
-class RequestStatus(str, Enum):
-    """Status of an inference request."""
-    PENDING = "pending"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-
-
-@dataclass
-class GenerationRequest:
-    """A single generation request."""
-    request_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
-    prompt: str = ""
-    prompt_token_ids: list[int] = field(default_factory=list)
-    sampling_params: SamplingParams = field(default_factory=SamplingParams)
-    status: RequestStatus = RequestStatus.PENDING
-    output_token_ids: list[int] = field(default_factory=list)
-    output_text: str = ""
-    created_at: float = field(default_factory=time.time)
-    started_at: Optional[float] = None
-    finished_at: Optional[float] = None
-    error: Optional[str] = None
-
-    # Streaming
-    _stream_callback: Optional[Callable[[str, bool], None]] = field(
-        default=None, repr=False
-    )
-
-    # Cancellation (thread-safe)
-    _cancelled: threading.Event = field(
-        default_factory=threading.Event, repr=False
-    )
-
-    # Internal state for batching
-    _past_key_values: Optional[tuple] = field(default=None, repr=False)
-    _prefix_len: int = field(default=0, repr=False)
-
-    def cancel(self):
-        """Signal this request to stop generating."""
-        self._cancelled.set()
-
-    @property
-    def is_cancelled(self) -> bool:
-        return self._cancelled.is_set()
-
-    @property
-    def total_tokens(self) -> int:
-        return len(self.prompt_token_ids) + len(self.output_token_ids)
-
-    @property
-    def generation_tokens(self) -> int:
-        return len(self.output_token_ids)
-
-    @property
-    def elapsed(self) -> float:
-        if self.started_at is None:
-            return 0.0
-        end = self.finished_at or time.time()
-        return end - self.started_at
-
-    @property
-    def tokens_per_second(self) -> float:
-        if self.elapsed == 0:
-            return 0.0
-        return self.generation_tokens / self.elapsed
 
 
 class InferenceEngine:
@@ -190,8 +118,18 @@ class InferenceEngine:
             req.started_at = time.time()
             req.status = RequestStatus.RUNNING
             
-            input_ids = torch.tensor([req.prompt_token_ids], device=device)
-            outputs = self.model(input_ids, use_cache=True)
+            # Prefix handling: skip prefilling tokens already in cache
+            if req._prefix_past_key_values is not None:
+                # We only prefill the suffix
+                input_ids = torch.tensor([req.prompt_token_ids[req._prefix_len:]], device=device)
+                outputs = self.model(
+                    input_ids, 
+                    past_key_values=req._prefix_past_key_values,
+                    use_cache=True
+                )
+            else:
+                input_ids = torch.tensor([req.prompt_token_ids], device=device)
+                outputs = self.model(input_ids, use_cache=True)
             
             req._past_key_values = outputs.past_key_values
             next_logits = outputs.logits[:, -1, :]
@@ -250,10 +188,17 @@ class InferenceEngine:
         return requests
 
     def _stream_req_token(self, request: GenerationRequest):
-        """Helper to decode and stream the latest token for a request."""
+        """Helper to stream the latest token ID (Stage 7 optimization)."""
+        if request._token_callback:
+            # Pass the raw token ID (last one) to the callback for async processing
+            last_id = request.output_token_ids[-1]
+            request._token_callback(last_id, False)
+            return
+
         if not request._stream_callback:
             return
             
+        # Fallback for old blocking style:
         full_ids = request.prompt_token_ids + request.output_token_ids
         current_text = self.tokenizer.decode(full_ids, skip_special_tokens=True)
         

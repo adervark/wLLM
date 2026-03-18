@@ -12,6 +12,8 @@ class QuantizationType(str, Enum):
     NONE = "none"
     INT8 = "8bit"
     NF4 = "4bit"
+    AWQ = "awq"
+    GPTQ = "gptq"
 
 
 class DType(str, Enum):

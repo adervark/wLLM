@@ -1,7 +1,7 @@
 # Ignore all markdown files except README
 #*.md
 !README.md
-
+documentation/Genesys.md
 # Virtual environment
 .venv/
 winllm.egg-info/

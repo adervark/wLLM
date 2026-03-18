@@ -36,6 +36,25 @@ def _build_quantization_config(model_config: ModelConfig) -> Optional[BitsAndByt
         )
     return None
 
+def _get_quantization_config(model_config: ModelConfig):
+    """Build the appropriate quantization configuration for HF Transformers."""
+    # bitsandbytes
+    if model_config.quantization in (QuantizationType.NF4, QuantizationType.INT8):
+        return _build_quantization_config(model_config)
+    
+    # GPTQ / AWQ
+    # These often don't need a separate config if the model is already quantized,
+    # but providing one can help configure the kernel.
+    if model_config.quantization == QuantizationType.GPTQ:
+        from transformers import GPTQConfig
+        return GPTQConfig(bits=4, disable_exllama=False)
+    
+    if model_config.quantization == QuantizationType.AWQ:
+        from transformers import AwqConfig
+        return AwqConfig(bits=4, fuse_max_seq_len=model_config.max_model_len, do_fuse=True)
+        
+    return None
+
 
 # GPU memory functions are now in device.py — re-exported here for backward compatibility.
 # get_gpu_memory_info and get_aggregate_gpu_memory are imported above from .device
@@ -120,7 +139,7 @@ class ModelLoader:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         # --- Build quantization config ---
-        quantization_config = _build_quantization_config(self.config)
+        quantization_config = _get_quantization_config(self.config)
 
         # --- Resolve device map ---
         device_map = self._resolve_device_map()

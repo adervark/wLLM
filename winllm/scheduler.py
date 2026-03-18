@@ -11,7 +11,17 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .config import SchedulerConfig, SamplingParams
-from .engine import GenerationRequest, InferenceEngine, RequestStatus
+from .engine import InferenceEngine
+from .types import GenerationRequest, RequestStatus
+
+def _get_prefix_hashes(tokens: list[int], block_size: int) -> list[int]:
+    """Generate hashes for every complete block prefix."""
+    hashes = []
+    num_blocks = len(tokens) // block_size
+    for i in range(1, num_blocks + 1):
+        # Hash the prefix up to the end of block i
+        hashes.append(hash(tuple(tokens[:i * block_size])))
+    return hashes
 
 logger = logging.getLogger(__name__)
 
@@ -107,13 +117,33 @@ class Scheduler:
             while len(self._active_reqs) < self.config.max_batch_size and self._waiting:
                 req = self._waiting.popleft()
                 
-                # Check KV cache admission
-                prompt_len = len(req.prompt_token_ids)
+                # Check KV cache admission with prefix matching
+                prompt_token_ids = req.prompt_token_ids
+                block_size = self.engine.kv_cache_manager.block_size
+                prefix_hashes = _get_prefix_hashes(prompt_token_ids, block_size)
+                
+                matched_blocks, matched_tensors = self.engine.kv_cache_manager.match_prefix(prefix_hashes)
+                matched_len = len(matched_blocks) * block_size
+                
+                req._prefix_len = matched_len
+                req._prefix_past_key_values = matched_tensors
+                
+                prompt_len = len(prompt_token_ids)
                 max_new = req.sampling_params.max_tokens
-                if self.engine.kv_cache_manager.can_allocate(prompt_len + max_new):
-                    self.engine.kv_cache_manager.allocate_sequence(req.request_id, prompt_len)
+                if self.engine.kv_cache_manager.can_allocate(prompt_len + max_new - matched_len):
+                    self.engine.kv_cache_manager.allocate_sequence(
+                        req.request_id, 
+                        prompt_len, 
+                        prefix_blocks=matched_blocks
+                    )
                     self._active_reqs.append(req)
-                    logger.debug("Admitted request %s to batch", req.request_id)
+                    logger.debug(
+                        "Admitted request %s to batch (prefix match: %d tokens)", 
+                        req.request_id, matched_len
+                    )
+                    
+                    # If it was a perfect match for a long prefix, we can promote it
+                    # actually promotion happens after prefill.
                 else:
                     # In a more complex scheduler, we might keep it in waiting,
                     # but here we fail it if it can't fit even when batch is empty.
@@ -163,6 +193,35 @@ class Scheduler:
 
             # 4. Cleanup finished/failed requests
             for req in finished:
+                # Potential promotion to prefix cache if it was long enough and successful
+                if req.status == RequestStatus.COMPLETED:
+                    block_size = self.engine.kv_cache_manager.block_size
+                    prompt_len = len(req.prompt_token_ids)
+                    if prompt_len >= block_size:
+                        # Promote the first block (or more) to prefix cache
+                        # We slice the tensors to only include the prompt part
+                        # past_key_values is ((k,v), (k,v), ...)
+                        # tensor shape is [batch, heads, seq, dim]
+                        prompt_kv = []
+                        for layer_kv in req._past_key_values:
+                            k, v = layer_kv
+                            # Slice to prompt length (index 2 is sequence length)
+                            prompt_kv.append((k[:, :, :prompt_len, :], v[:, :, :prompt_len, :]))
+                        
+                        prompt_kv = tuple(prompt_kv)
+                        
+                        first_block_hash = hash(tuple(req.prompt_token_ids[:block_size]))
+                        # We only promote the first block's tensors for now (exact match)
+                        # We slice the tensors even further to just the first block
+                        first_block_kv = []
+                        for layer_kv in prompt_kv:
+                            k, v = layer_kv
+                            first_block_kv.append((k[:, :, :block_size, :], v[:, :, :block_size, :]))
+                        
+                        self.engine.kv_cache_manager.promote_to_prefix(
+                            first_block_hash, req.request_id, block_size, tuple(first_block_kv)
+                        )
+
                 self._active_reqs.remove(req)
                 self.engine.kv_cache_manager.free_sequence(req.request_id)
                 self._handle_completed(req)

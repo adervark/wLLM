@@ -10,11 +10,11 @@ winllm <command> [options]
 
 | Command | Description |
 |---|---|
-| `serve` | Start an OpenAI-compatible API server |
-| `chat` | Interactive chat session in the terminal |
-| `benchmark` | Run a throughput benchmark |
-| `list` | List downloaded models from HuggingFace cache |
-| `detect` | Detect and display hardware info |
+| [`serve`](#winllm-serve) | Start an OpenAI-compatible API server ([source](../winllm/commands/serve.py)) |
+| [`chat`](#winllm-chat) | Interactive chat session in the terminal ([source](../winllm/commands/chat.py)) |
+| [`benchmark`](#winllm-benchmark) | Run a throughput benchmark ([source](../winllm/commands/benchmark.py)) |
+| [`list`](#winllm-list) | List downloaded models from HuggingFace cache ([source](../winllm/commands/list.py)) |
+| [`detect`](#winllm-detect) | Detect and display hardware info ([source](../winllm/commands/detect.py)) |
 
 ---
 
