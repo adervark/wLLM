@@ -6,6 +6,7 @@ from winllm.device import (
     GPUInfo,
     HardwareDefaults,
     DeviceInfo,
+    SystemProfile,
     _build_defaults,
     _apply_env_overrides,
 )
@@ -86,7 +87,7 @@ class TestDeviceInfo:
         s = info.summary()
         assert s["device_type"] == "cpu"
         assert s["device_count"] == 0
-        assert "profile" not in s
+        assert s["profile"] == "cpu"
         assert s["gpus"] == []
 
     def test_summary_with_gpus(self):
@@ -95,13 +96,14 @@ class TestDeviceInfo:
             device_type="cuda", device_count=1, devices=[gpu],
             total_vram_gb=24.0, platform="windows",
         )
+        info.classify_profile()
         info.defaults = _build_defaults(info)
         s = info.summary()
         assert s["device_count"] == 1
         assert len(s["gpus"]) == 1
         assert s["gpus"][0]["name"] == "RTX 4090"
         assert s["total_vram_gb"] == 24.0
-        assert "profile" not in s
+        assert s["profile"] == "high"  # 24GB is classified as high
 
 
 # ─── Env Overrides ───────────────────────────────────────────────────────────

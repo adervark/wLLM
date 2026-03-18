@@ -18,6 +18,7 @@ class KVBlock:
     block_id: int
     num_tokens: int = 0
     max_tokens: int = 16
+    ref_count: int = 0 # Track how many sequences/prefixes use this block
 
     @property
     def is_full(self) -> bool:
@@ -60,11 +61,20 @@ class KVCacheManager:
         self._next_block_id = 0
 
         # Calculate available blocks based on GPU memory
-        self.max_total_blocks = self._estimate_max_blocks()
-        self._allocated_blocks: int = 0
-
         # seq_id -> SequenceBlocks
         self._sequences: dict[str, SequenceBlocks] = {}
+
+        # prefix_hash -> list[KVBlock]
+        self._prefix_cache_blocks: dict[int, list[KVBlock]] = {}
+        
+        # prefix_hash -> tuple[tuple[torch.Tensor]] (physical past_key_values)
+        self._prefix_cache_tensors: dict[int, tuple] = {}
+
+        # block_id -> KVBlock (for global ref management)
+        self._block_pool: dict[int, KVBlock] = {}
+
+        self.max_total_blocks = self._estimate_max_blocks()
+        self._allocated_blocks: int = 0 # This will be updated by _update_allocated_count
 
         logger.info(
             "KVCacheManager initialized: block_size=%d, max_blocks=%d (~%d tokens capacity)",
@@ -179,40 +189,98 @@ class KVCacheManager:
         needed_blocks = (num_tokens + self.block_size - 1) // self.block_size
         return needed_blocks <= self.num_free_blocks
 
-    def allocate_sequence(self, seq_id: str, num_tokens: int) -> bool:
+    def allocate_sequence(self, seq_id: str, num_tokens: int, prefix_blocks: Optional[list[KVBlock]] = None) -> bool:
         if seq_id in self._sequences:
             logger.warning("Sequence %s already allocated", seq_id)
             return True
 
-        needed = (num_tokens + self.block_size - 1) // self.block_size
-        if needed > self.num_free_blocks:
+        # If we have prefix blocks, we only need to allocate the rest
+        prefix_tokens = sum(b.num_tokens for b in prefix_blocks) if prefix_blocks else 0
+        remaining_tokens = max(0, num_tokens - prefix_tokens)
+        
+        needed_new = (remaining_tokens + self.block_size - 1) // self.block_size
+        if needed_new > self.num_free_blocks:
             logger.warning(
                 "Cannot allocate %d blocks for seq %s (free=%d)",
-                needed, seq_id, self.num_free_blocks,
+                needed_new, seq_id, self.num_free_blocks,
             )
             return False
 
         blocks = []
-        remaining = num_tokens
-        for _ in range(needed):
+        # Reuse prefix blocks first
+        if prefix_blocks:
+            for b in prefix_blocks:
+                b.ref_count += 1
+                blocks.append(b)
+                if b.block_id not in self._block_pool:
+                     self._block_pool[b.block_id] = b
+
+        # Allocate new blocks
+        remaining = remaining_tokens
+        for _ in range(needed_new):
             tokens_in_block = min(remaining, self.block_size)
             block = KVBlock(
                 block_id=self._next_block_id,
                 num_tokens=tokens_in_block,
                 max_tokens=self.block_size,
+                ref_count=1
             )
             self._next_block_id += 1
             blocks.append(block)
+            self._block_pool[block.block_id] = block
             remaining -= tokens_in_block
 
         self._sequences[seq_id] = SequenceBlocks(seq_id=seq_id, blocks=blocks)
-        self._allocated_blocks += needed
+        # Note: allocated blocks now counts blocks with ref_count > 0 in a real pool sense
+        # For this logic, we keep it simple
+        self._update_allocated_count()
 
         logger.debug(
-            "Allocated %d blocks for seq %s (%d tokens, utilization=%.1f%%)",
-            needed, seq_id, num_tokens, self.utilization * 100,
+            "Allocated %d blocks (rewriting %d prefix) for seq %s",
+            len(blocks), len(prefix_blocks) if prefix_blocks else 0, seq_id
         )
         return True
+
+    def _update_allocated_count(self):
+        self._allocated_blocks = len([b for b in self._block_pool.values() if b.ref_count > 0])
+
+    def match_prefix(self, prefix_hashes: list[int]) -> tuple[list[KVBlock], Optional[tuple]]:
+        """Find the longest matching prefix sequence of blocks and its tensors."""
+        matched_blocks = []
+        matched_tensors = None
+        
+        # Iterating through hashes (which are cumulative) to find the longest match
+        for h in prefix_hashes:
+            if h in self._prefix_cache_blocks:
+                matched_blocks = self._prefix_cache_blocks[h]
+                matched_tensors = self._prefix_cache_tensors.get(h)
+            else:
+                break
+        return matched_blocks, matched_tensors
+
+    def promote_to_prefix(self, prefix_hash: int, seq_id: str, num_tokens: int, past_key_values: tuple):
+        """Associate a prefix hash with existing blocks and their physical tensors."""
+        if seq_id not in self._sequences:
+            return
+        
+        num_blocks = (num_tokens + self.block_size - 1) // self.block_size
+        blocks = self._sequences[seq_id].blocks[:num_blocks]
+        
+        # Only promote if we don't have it yet
+        if prefix_hash not in self._prefix_cache_blocks:
+            for b in blocks:
+                b.ref_count += 1
+            self._prefix_cache_blocks[prefix_hash] = blocks
+            
+            # We must store a copy of the tensors to avoid them being modified
+            # past_key_values is usually a nested tuple of tensors
+            # [layer_0_k, layer_0_v], [layer_1_k, layer_1_v] ...
+            # Each tensor has shape [batch, heads, seq_len, dim]
+            # Since we only cache the prefix, we might want to slice them if they are too long.
+            # For now we assume num_tokens exactly matches the tensors provided.
+            self._prefix_cache_tensors[prefix_hash] = past_key_values
+            
+            logger.debug("Promoted %d tokens to physical prefix cache with hash %d", num_tokens, prefix_hash)
 
     def extend_sequence(self, seq_id: str, additional_tokens: int) -> bool:
         if seq_id not in self._sequences:
@@ -239,12 +307,14 @@ class KVCacheManager:
                     block_id=self._next_block_id,
                     num_tokens=tokens_in_block,
                     max_tokens=self.block_size,
+                    ref_count=1
                 )
                 self._next_block_id += 1
                 seq_blocks.blocks.append(block)
+                self._block_pool[block.block_id] = block
                 remaining -= tokens_in_block
 
-            self._allocated_blocks += needed
+            self._update_allocated_count()
 
         return True
 
@@ -253,11 +323,17 @@ class KVCacheManager:
             return
 
         seq_blocks = self._sequences.pop(seq_id)
-        self._allocated_blocks -= seq_blocks.num_blocks
+        for b in seq_blocks.blocks:
+            b.ref_count -= 1
+            if b.ref_count == 0:
+                if b.block_id in self._block_pool:
+                    del self._block_pool[b.block_id]
+        
+        self._update_allocated_count()
 
         logger.debug(
-            "Freed %d blocks for seq %s (utilization=%.1f%%)",
-            seq_blocks.num_blocks, seq_id, self.utilization * 100,
+            "Released sequence %s, utilization now %.1f%%",
+            seq_id, self.utilization * 100,
         )
 
     def get_stats(self) -> dict:

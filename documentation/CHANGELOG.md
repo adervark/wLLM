@@ -4,6 +4,13 @@ All notable changes to WinLLM are documented here.
 
 ---
 
+## [0.4.0] - 2026-03-16
+### Added
+- **Prefix Caching**: Physical KV cache storage with block-based hashing. Reduces TTFT for recurring prompts to near-zero.
+- **Hardware-Native Quantization**: Added support for AWQ and GPTQ backends (`-q awq`, `-q gptq`).
+- **Async Streaming**: Decoupled token decoding from the inference loop, eliminating $O(N^2)$ string overhead.
+- KV Cache block reference counting for memory safety during prefix reuse.
+
 ## [0.3.0] — 2026-03-16
 
 ### Performance Optimization and Continuous Batching

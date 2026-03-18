@@ -2,6 +2,13 @@
 
 This document provides a comprehensive, visual guide to the software architecture, design patterns, and internal workflows of the WinLLM inference engine. It is designed to help contributors quickly understand how the system is organized, how data flows through the engine, and how memory is managed.
 
+> [!NOTE] Table of Contents
+> - [1. High-Level System Architecture](#1-high-level-system-architecture)
+> - [2. The Request Lifecycle Flow](#2-the-request-lifecycle-flow)
+> - [3. Dynamic Memory & Hardware Management](#3-dynamic-memory--hardware-management)
+> - [4. Class & Data Flow Diagram](#4-class--data-flow-diagram)
+> - [5. Component Deep Dive](#5-component-deep-dive)
+
 ---
 
 ## 1. High-Level System Architecture
@@ -247,33 +254,33 @@ classDiagram
 
 ## 5. Component Deep Dive
 
-### `api_server.py` | The Gateway
+### [`api_server.py`](../winllm/api_server.py) | The Gateway
 - Emulates standard OpenAI REST API.
 - Implements FastAPI's modern `@asynccontextmanager` `lifespan` hook. The model is loaded onto the GPU during startup, and gracefully unloaded during shutdown (Ctrl+C).
 - Handles streaming by acting as an asynchronous bridge to the synchronous PyTorch loops. Uses `asyncio.Queue` and `loop.call_soon_threadsafe()`.
 - Catches GPU timeouts and injects JSON-formatted error chunks securely into the SSE stream.
 
-### `scheduler.py` | The Task Orchestrator
+### [`scheduler.py`](../winllm/scheduler.py) | The Task Orchestrator
 - **Continuous Batching**: No longer uses a semaphore for simple concurrency. Instead, it maintains a background `_loop_thread` that constantly attempts to admit new requests into an active batch based on KV cache availability.
 - **Async Interface**: Provides `submit()` and `submit_streaming()` as async interfaces, while the actual heavy lifting happens in the background thread via the `InferenceLoop`.
 
-### `engine.py` | The Batched Inference Engine
+### [`engine.py`](../winllm/engine.py) | The Batched Inference Engine
 - **`generate_step()`**: The primary entry point for inference. It takes a *list* of requests and performs one iteration of prefill or decode for all of them.
 - **Integrated `torch.compile`**: Supports compiling the forward pass into optimized kernels, significantly improving throughput by reducing Python overhead in the decode iterations.
 
-### `speculative.py` | Accelerated Generation
+### [`speculative.py`](../winllm/speculative.py) | Accelerated Generation
 - **Draft Model Logic**: Implements speculative decoding where a smaller model proposes tokens that the larger target model verifies in a single forward pass.
 - **Acceptance Loop**: Dynamically adjusts the target model's KV cache and output tokens based on how many "draft" tokens were correct.
 
-### `kv_cache.py` | Logical Memory Tracker
+### [`kv_cache.py`](../winllm/kv_cache.py) | Logical Memory Tracker
 - **Iteration-Level Allocation**: Tracks block usage across the entire batch.
 - **Sequence Management**: Provides `allocate_sequence`, `extend_sequence`, and `free_sequence` methods invoked by the scheduler and engine during the generation lifecycle.
 
-### `cli.py` & `config.py` | Unified Configurations
+### [`cli.py`](../winllm/cli.py) & [`config.py`](../winllm/config.py) | Unified Configurations
 - Centralizes Dataclasses (`ModelConfig`, `SchedulerConfig`, `KVCacheConfig`, `SamplingParams`).
 - CLI params naturally cascade into Config objects. The `--auto-config` flag triggers the dynamic hardware discovery sequence, overwriting baseline constraints with optimized formulas.
 
-### `registry.py` | Model Introspection
+### [`registry.py`](../winllm/registry.py) | Model Introspection
 - Examines the HuggingFace repo name (e.g. `meta-llama/Llama-3.1-8B-Instruct`).
 - Determines the architectural family (Llama, Gemma, Mistral, Qwen).
 - Injects ideal hyper-parameters (e.g. `max_context_window=32768`, `rope_scaling=True`) before the tensors are ever initialized in VRAM.

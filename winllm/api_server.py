@@ -16,9 +16,10 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from .config import ModelConfig, SamplingParams, SchedulerConfig, ServerConfig, KVCacheConfig
-from .engine import GenerationRequest, InferenceEngine
+from .engine import InferenceEngine
 from .model_loader import get_gpu_memory_info
 from .scheduler import Scheduler
+from .types import GenerationRequest
 from .utils import format_chat_prompt
 
 logger = logging.getLogger(__name__)
@@ -291,11 +292,8 @@ def create_app(
     ):
         """Unified SSE stream for both chat and text completions.
 
-        Uses asyncio.Queue with call_soon_threadsafe for a proper
-        async/sync bridge. Propagates errors as SSE error events.
-
-        Args:
-            response_type: "chat" for chat completions, "completion" for text completions.
+        Optimization (Stage 7): Receives token IDs from the inference loop
+        and performs decoding in this async task to keep the GPU loop fast.
         """
         import json
 
@@ -306,90 +304,73 @@ def create_app(
         request_id = f"{id_prefix}-{gen_request.request_id}"
 
         loop = asyncio.get_running_loop()
-        token_queue: asyncio.Queue[tuple[str, bool] | BaseException] = asyncio.Queue()
+        token_id_queue: asyncio.Queue[tuple[int, bool] | BaseException] = asyncio.Queue()
 
-        def callback(text: str, finished: bool):
-            loop.call_soon_threadsafe(token_queue.put_nowait, (text, finished))
+        def token_callback(token_id: int, finished: bool):
+            loop.call_soon_threadsafe(token_id_queue.put_nowait, (token_id, finished))
 
-        gen_request._stream_callback = callback
+        gen_request._token_callback = token_callback
 
-        def _run_generate():
-            try:
-                engine.generate(gen_request)
-            except BaseException as exc:
-                loop.call_soon_threadsafe(token_queue.put_nowait, exc)
-
-        # Start generation in background
-        gen_task = loop.run_in_executor(None, _run_generate)
+        # Start generation via scheduler to ensure batching/admission control
+        gen_task = loop.create_task(scheduler.submit_streaming(gen_request))
+        last_text_len = 0
 
         try:
             while True:
                 try:
                     item = await asyncio.wait_for(
-                        token_queue.get(), timeout=stream_timeout
+                        token_id_queue.get(), timeout=stream_timeout
                     )
                 except asyncio.TimeoutError:
-                    # Token generation stalled — cancel and notify client
                     gen_request.cancel()
                     error_chunk = {
-                        "id": request_id,
-                        "object": object_type,
-                        "created": int(time.time()),
+                        "id": request_id, "object": object_type, "created": int(time.time()),
                         "model": model_name,
-                        "error": {
-                            "message": f"Token generation timed out after {stream_timeout}s",
-                            "type": "timeout",
-                        },
+                        "error": {"message": f"Token generation timed out after {stream_timeout}s", "type": "timeout"},
                     }
                     yield {"data": json.dumps(error_chunk)}
                     yield {"data": "[DONE]"}
                     break
 
-                # If the generation thread raised, send an error event
                 if isinstance(item, BaseException):
                     error_chunk = {
-                        "id": request_id,
-                        "object": object_type,
-                        "created": int(time.time()),
+                        "id": request_id, "object": object_type, "created": int(time.time()),
                         "model": model_name,
-                        "error": {
-                            "message": str(item),
-                            "type": type(item).__name__,
-                        },
+                        "error": {"message": str(item), "type": type(item).__name__},
                     }
                     yield {"data": json.dumps(error_chunk)}
                     yield {"data": "[DONE]"}
                     break
 
-                text, finished = item
+                token_id, finished = item
                 if finished:
-                    # Final chunk with finish_reason
                     choice = {"index": 0, "finish_reason": "stop"}
                     choice["delta" if is_chat else "text"] = {} if is_chat else ""
                     chunk = {
-                        "id": request_id,
-                        "object": object_type,
-                        "created": int(time.time()),
-                        "model": model_name,
-                        "choices": [choice],
+                        "id": request_id, "object": object_type, "created": int(time.time()),
+                        "model": model_name, "choices": [choice],
                     }
                     yield {"data": json.dumps(chunk)}
                     yield {"data": "[DONE]"}
                     break
                 else:
-                    choice = {"index": 0, "finish_reason": None}
-                    if is_chat:
-                        choice["delta"] = {"content": text}
-                    else:
-                        choice["text"] = text
-                    chunk = {
-                        "id": request_id,
-                        "object": object_type,
-                        "created": int(time.time()),
-                        "model": model_name,
-                        "choices": [choice],
-                    }
-                    yield {"data": json.dumps(chunk)}
+                    # Decode tokens in this async thread
+                    full_text = engine.decode_tokens(gen_request.prompt_token_ids + gen_request.output_token_ids)
+                    if len(full_text) > last_text_len:
+                        new_text = full_text[last_text_len:]
+                        last_text_len = len(full_text)
+                        
+                        choice = {"index": 0, "finish_reason": None}
+                        if is_chat:
+                            choice["delta"] = {"content": new_text}
+                        else:
+                            choice["text"] = new_text
+                        
+                        chunk = {
+                            "id": request_id, "object": object_type, "created": int(time.time()),
+                            "model": model_name, "choices": [choice],
+                        }
+                        yield {"data": json.dumps(chunk)}
         finally:
             await gen_task
 

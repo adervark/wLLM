@@ -19,6 +19,15 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class SystemProfile(str, Enum):
+    """Classification of the hardware environment."""
+    CPU = "cpu"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    EXTREME = "extreme"
+
+
 @dataclass
 class GPUInfo:
     """Information about a single GPU."""
@@ -50,6 +59,7 @@ class DeviceInfo:
     total_vram_gb: float = 0.0
     total_cpu_ram_gb: float = 0.0
     platform: str = ""                   # "windows", "linux", "darwin"
+    profile: SystemProfile = SystemProfile.CPU
     defaults: Optional['HardwareDefaults'] = None
 
     @staticmethod
@@ -68,6 +78,7 @@ class DeviceInfo:
             device_count=0,
             platform=system_platform,
             total_cpu_ram_gb=ram_gb,
+            profile=SystemProfile.CPU,
         )
 
         if not torch.cuda.is_available():
@@ -91,6 +102,9 @@ class DeviceInfo:
 
         info.total_vram_gb = round(info.total_vram_gb, 2)
 
+        # Classify profile
+        info.classify_profile()
+
         # Set dynamic allocation
         info.defaults = _build_defaults(info)
 
@@ -107,6 +121,21 @@ class DeviceInfo:
 
         return info
 
+    def classify_profile(self):
+        """Classify the current hardware into a SystemProfile."""
+        if self.device_type == "cpu" or self.device_count == 0:
+            self.profile = SystemProfile.CPU
+            return
+
+        if self.total_vram_gb >= 40:
+            self.profile = SystemProfile.EXTREME
+        elif self.total_vram_gb >= 16:
+            self.profile = SystemProfile.HIGH
+        elif self.total_vram_gb >= 8:
+            self.profile = SystemProfile.MEDIUM
+        else:
+            self.profile = SystemProfile.LOW
+
     def summary(self) -> dict:
         """JSON-friendly summary."""
         return {
@@ -115,6 +144,7 @@ class DeviceInfo:
             "total_vram_gb": self.total_vram_gb,
             "total_cpu_ram_gb": self.total_cpu_ram_gb,
             "platform": self.platform,
+            "profile": self.profile.value,
             "gpus": [
                 {"index": g.index, "name": g.name, "vram_gb": g.total_vram_gb, "compute_capability": g.compute_capability}
                 for g in self.devices
@@ -202,84 +232,81 @@ def _build_defaults(info: DeviceInfo) -> HardwareDefaults:
     return _apply_env_overrides(defaults)
 
 
-def get_all_gpu_memory_info() -> list[dict[str, float]]:
-    """Get memory info for all GPUs."""
-    import torch
+class MemoryUtils:
+    """Utilities for tracking GPU memory usage."""
 
-    if not torch.cuda.is_available():
-        return []
+    @staticmethod
+    def get_all_info() -> list[dict[str, float]]:
+        """Get memory info for all GPUs."""
+        import torch
+        if not torch.cuda.is_available():
+            return []
+        result = []
+        for i in range(torch.cuda.device_count()):
+            total = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
+            allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)
+            reserved = torch.cuda.memory_reserved(i) / (1024 ** 3)
+            result.append({
+                "device": i,
+                "name": torch.cuda.get_device_properties(i).name,
+                "total_gb": round(total, 2),
+                "allocated_gb": round(allocated, 2),
+                "reserved_gb": round(reserved, 2),
+                "free_gb": round(total - reserved, 2),
+            })
+        return result
 
-    result = []
-    for i in range(torch.cuda.device_count()):
-        total = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
-        allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)
-        reserved = torch.cuda.memory_reserved(i) / (1024 ** 3)
-        result.append({
-            "device": i,
-            "name": torch.cuda.get_device_properties(i).name,
-            "total_gb": round(total, 2),
-            "allocated_gb": round(allocated, 2),
-            "reserved_gb": round(reserved, 2),
-            "free_gb": round(total - reserved, 2),
-        })
-    return result
+    @staticmethod
+    def get_total_vram() -> float:
+        """Get total VRAM across all GPUs in bytes."""
+        import torch
+        if not torch.cuda.is_available():
+            return 0.0
+        total = 0.0
+        for i in range(torch.cuda.device_count()):
+            total += torch.cuda.get_device_properties(i).total_memory
+        return total
+
+    @staticmethod
+    def get_info(device_index: int = 0) -> dict[str, float]:
+        """Get current GPU memory usage in GB for a single device."""
+        import torch
+        if not torch.cuda.is_available() or device_index >= torch.cuda.device_count():
+            return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
+        total = torch.cuda.get_device_properties(device_index).total_memory / (1024 ** 3)
+        allocated = torch.cuda.memory_allocated(device_index) / (1024 ** 3)
+        reserved = torch.cuda.memory_reserved(device_index) / (1024 ** 3)
+        return {
+            "total": round(total, 2),
+            "allocated": round(allocated, 2),
+            "reserved": round(reserved, 2),
+            "free": round(total - reserved, 2),
+        }
+
+    @staticmethod
+    def get_aggregate_info() -> dict[str, float]:
+        """Get aggregate GPU memory across all devices."""
+        import torch
+        if not torch.cuda.is_available():
+            return {"total": 0, "allocated": 0, "reserved": 0, "free": 0, "device_count": 0}
+        total = allocated = reserved = 0.0
+        count = torch.cuda.device_count()
+        for i in range(count):
+            props = torch.cuda.get_device_properties(i)
+            total += props.total_memory / (1024 ** 3)
+            allocated += torch.cuda.memory_allocated(i) / (1024 ** 3)
+            reserved += torch.cuda.memory_reserved(i) / (1024 ** 3)
+        return {
+            "total": round(total, 2),
+            "allocated": round(allocated, 2),
+            "reserved": round(reserved, 2),
+            "free": round(total - reserved, 2),
+            "device_count": count,
+        }
 
 
-def get_total_gpu_memory() -> float:
-    """Get total VRAM across all GPUs in bytes."""
-    import torch
-
-    if not torch.cuda.is_available():
-        return 0.0
-
-    total = 0.0
-    for i in range(torch.cuda.device_count()):
-        total += torch.cuda.get_device_properties(i).total_memory
-    return total
-
-
-def get_gpu_memory_info(device_index: int = 0) -> dict[str, float]:
-    """Get current GPU memory usage in GB for a single device."""
-    import torch
-
-    if not torch.cuda.is_available():
-        return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
-
-    if device_index >= torch.cuda.device_count():
-        return {"total": 0, "allocated": 0, "reserved": 0, "free": 0}
-
-    total = torch.cuda.get_device_properties(device_index).total_memory / (1024 ** 3)
-    allocated = torch.cuda.memory_allocated(device_index) / (1024 ** 3)
-    reserved = torch.cuda.memory_reserved(device_index) / (1024 ** 3)
-    free = total - reserved
-    return {
-        "total": round(total, 2),
-        "allocated": round(allocated, 2),
-        "reserved": round(reserved, 2),
-        "free": round(free, 2),
-    }
-
-
-def get_aggregate_gpu_memory() -> dict[str, float]:
-    """Get aggregate GPU memory across all devices."""
-    import torch
-
-    if not torch.cuda.is_available():
-        return {"total": 0, "allocated": 0, "reserved": 0, "free": 0, "device_count": 0}
-
-    total = allocated = reserved = 0.0
-    count = torch.cuda.device_count()
-
-    for i in range(count):
-        props = torch.cuda.get_device_properties(i)
-        total += props.total_memory / (1024 ** 3)
-        allocated += torch.cuda.memory_allocated(i) / (1024 ** 3)
-        reserved += torch.cuda.memory_reserved(i) / (1024 ** 3)
-
-    return {
-        "total": round(total, 2),
-        "allocated": round(allocated, 2),
-        "reserved": round(reserved, 2),
-        "free": round(total - reserved, 2),
-        "device_count": count,
-    }
+# Aliases for backward compatibility
+get_all_gpu_memory_info = MemoryUtils.get_all_info
+get_total_gpu_memory = MemoryUtils.get_total_vram
+get_gpu_memory_info = MemoryUtils.get_info
+get_aggregate_gpu_memory = MemoryUtils.get_aggregate_info

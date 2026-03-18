@@ -76,6 +76,14 @@ Any HuggingFace `AutoModelForCausalLM` model works. Recommended for 8GB VRAM:
 | `/v1/completions` | POST | Text completion |
 | `/health` | GET | Server health & GPU stats |
 
+## Documentation
+
+WinLLM comes with comprehensive documentation optimized for reading on GitHub or as an Obsidian vault:
+
+- 🏗️ **[Architecture Details](documentation/Architecture.md)** — A visual guide to the software architecture and internal workflows.
+- 🧠 **[Deep Dive (Genesys)](documentation/Genesys.md)** — A first-principles guide explaining how LLM inference engines work under the hood.
+- ⌨️ **[Commands Reference](documentation/COMMANDS.md)** — Detailed CLI usage, options, and auto-configuration guide.
+
 ## Architecture
 
 Request → API Server → Scheduler (Waiting Queue)
@@ -85,6 +93,23 @@ Request → API Server → Scheduler (Waiting Queue)
                    KV Cache Manager   Speculative Engine
                            ↓
                     Model (PyTorch) ← [torch.compile]
+
+## Testing
+
+To run the full test suite and ensure everything works:
+
+```bash
+# Using uv (recommended)
+uv run pytest tests/ -v
+
+# Or using the built-in batch file
+setup_and_test.bat
+```
+
+Individual component tests can be run via:
+- `pytest tests/test_device.py` (Hardware detection)
+- `pytest tests/test_sampler.py` (Logits processing)
+- `pytest tests/test_kv_cache.py` (Memory management)
 
 ## License
 
