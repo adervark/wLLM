@@ -94,7 +94,6 @@ Any HuggingFace `AutoModelForCausalLM` model works. Recommended for 8GB VRAM:
 WinLLM comes with comprehensive documentation optimized for reading on GitHub or as an Obsidian vault:
 
 - **[Architecture Details](documentation/Architecture.md)** — A visual guide to the software architecture and internal workflows.
-- **[Deep Dive (Genesys)](documentation/Genesys.md)** — A first-principles guide explaining how LLM inference engines work under the hood.
 - **[Commands Reference](documentation/COMMANDS.md)** — Detailed CLI usage, options, and auto-configuration guide.
 
 ## Architecture
