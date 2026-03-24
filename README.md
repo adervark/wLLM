@@ -28,6 +28,10 @@ While tools like Ollama are fantastic for consumer-friendly local generation usi
 
 ### Install
 
+**The Easiest Way (Windows):**
+Simply double-click the `install.bat` file in the root directory. It will automatically detect/create a virtual environment, install PyTorch with CUDA 12.4 support, and install the wLLM engine.
+
+**Manual Installation (using `uv`):**
 ```bash
 # Create a virtual environment
 uv venv .venv
