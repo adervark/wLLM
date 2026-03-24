@@ -24,7 +24,8 @@ if %errorlevel% neq 0 (
 
 echo [1/4] Creating virtual environment (.venv)...
 if not exist .venv (
-    uv venv .venv
+    :: PyTorch does not currently support Python 3.14+ wheels yet, so we explicitly pin to 3.12
+    uv venv .venv --python 3.12
     echo Virtual environment created.
 ) else (
     echo Virtual environment already exists.
@@ -42,7 +43,7 @@ uv pip install -e . --extra-index-url https://download.pytorch.org/whl/cu124
 
 echo.
 echo [4/4] Adding wLLM to system PATH...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User'); $wllmPath = Join-Path -Path $PWD -ChildPath '.venv\Scripts'; if ($userPath -notmatch [regex]::Escape($wllmPath)) { [Environment]::SetEnvironmentVariable('PATH', $userPath + ';' + $wllmPath, 'User'); Write-Host 'Successfully added wLLM to your User PATH.' } else { Write-Host 'wLLM is already in your PATH.' }"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User'); $wllmPath = '%~dp0.venv\Scripts'; if ($userPath -notmatch [regex]::Escape($wllmPath)) { [Environment]::SetEnvironmentVariable('PATH', $userPath + ';' + $wllmPath, 'User'); Write-Host \"Successfully added wLLM ($wllmPath) to your User PATH.\" } else { Write-Host 'wLLM is already in your PATH.' }"
 
 echo.
 echo ===================================================
