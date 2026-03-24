@@ -53,6 +53,12 @@ class GenerationRequest:
     _past_key_values: Optional[tuple] = field(default=None, repr=False)
     _prefix_len: int = field(default=0, repr=False)
     _prefix_past_key_values: Optional[tuple] = field(default=None, repr=False)
+    _prefill_cursor: int = field(default=0, repr=False)
+
+    @property
+    def is_prefill_complete(self) -> bool:
+        """Returns True if the entire prompt has been processed by prefill."""
+        return self._prefill_cursor >= len(self.prompt_token_ids)
 
     def cancel(self):
         """Signal this request to stop generating."""

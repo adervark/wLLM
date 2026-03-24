@@ -127,26 +127,25 @@ class InferenceEngine:
     # ------------------------------------------------------------------
 
     @torch.inference_mode()
-    def generate_step(self, requests: list[GenerationRequest]) -> list[GenerationRequest]:
+    def generate_step(self, requests: list[GenerationRequest], chunked_prefill_enabled: bool = False, max_num_batched_tokens: int = 512) -> list[GenerationRequest]:
         """Perform a single inference step for a batch of requests.
 
         This handles both:
           - Prefill for NEW requests (first time the model sees the prompt).
           - Decode for EXISTING requests (generate one more token).
-
-        The Scheduler calls this method in a loop.
+          - Chunked prefill: processing long prompts incrementally.
         """
         if not requests:
             return []
 
         device = self._resolve_device()
 
-        # Separate requests into those that need prefill vs. those already decoding
-        prefill_reqs = [r for r in requests if r._past_key_values is None]
-        decode_reqs = [r for r in requests if r._past_key_values is not None]
+        # Separate requests by prefill progress
+        prefill_reqs = [r for r in requests if not r.is_prefill_complete]
+        decode_reqs = [r for r in requests if r.is_prefill_complete]
 
         for req in prefill_reqs:
-            self._prefill_single_request(req, device)
+            self._prefill_single_request(req, device, chunked_prefill_enabled, max_num_batched_tokens)
 
         for req in decode_reqs:
             self._decode_single_request(req, device, batch_size=len(decode_reqs))
@@ -164,11 +163,11 @@ class InferenceEngine:
         except StopIteration:
             return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def _prefill_single_request(self, req: GenerationRequest, device: torch.device):
+    def _prefill_single_request(self, req: GenerationRequest, device: torch.device, chunked_prefill: bool, max_tokens: int):
         """Run the prefill forward pass for a single new request.
 
-        Processes the full prompt in one pass and generates the first token.
-        If there's a cached prefix, only the suffix needs to be processed.
+        Processes the prompt in one pass, or in chunks if chunked prefill is enabled. 
+        Generates the first output token only after the final chunk completes.
         """
         if not req.prompt_token_ids:
             req.prompt_token_ids = self.tokenize(req.prompt)
@@ -176,29 +175,42 @@ class InferenceEngine:
         req.started_at = time.time()
         req.status = RequestStatus.RUNNING
 
-        # If we have a prefix cache hit, only process the new suffix tokens
-        if req._prefix_past_key_values is not None:
-            input_ids = torch.tensor([req.prompt_token_ids[req._prefix_len:]], device=device)
-            outputs = self.model(
-                input_ids,
-                past_key_values=req._prefix_past_key_values,
-                use_cache=True
-            )
+        # Fast forward cursor if prefix cache hit
+        if req._prefill_cursor == 0 and req._prefix_past_key_values is not None:
+            req._prefill_cursor = req._prefix_len
+            req._past_key_values = req._prefix_past_key_values
+
+        start_idx = req._prefill_cursor
+        remaining_tokens = len(req.prompt_token_ids) - start_idx
+        
+        if chunked_prefill and remaining_tokens > max_tokens:
+            end_idx = start_idx + max_tokens
+            is_final_chunk = False
         else:
-            input_ids = torch.tensor([req.prompt_token_ids], device=device)
-            outputs = self.model(input_ids, use_cache=True)
+            end_idx = start_idx + remaining_tokens
+            is_final_chunk = True
+
+        chunk_ids = req.prompt_token_ids[start_idx:end_idx]
+        input_ids = torch.tensor([chunk_ids], device=device)
+
+        outputs = self.model(
+            input_ids,
+            past_key_values=req._past_key_values,
+            use_cache=True
+        )
 
         req._past_key_values = outputs.past_key_values
-        next_logits = outputs.logits[:, -1, :]
+        req._prefill_cursor = end_idx
 
-        # Sample the first output token
-        next_token_id = sample_token(next_logits, req.sampling_params, req.output_token_ids)
-        req.output_token_ids.append(next_token_id.item())
+        # Only sample if we've processed the entire prompt
+        if is_final_chunk:
+            next_logits = outputs.logits[:, -1, :]
+            next_token_id = sample_token(next_logits, req.sampling_params, req.output_token_ids)
+            req.output_token_ids.append(next_token_id.item())
 
-        # Set up the text prefix for streaming delta calculation
-        prompt_text = self.tokenizer.decode(req.prompt_token_ids, skip_special_tokens=True)
-        req._prefix_len = len(prompt_text)
-        self._emit_stream_token(req)
+            prompt_text = self.tokenizer.decode(req.prompt_token_ids, skip_special_tokens=True)
+            req._prefix_len = len(prompt_text)
+            self._emit_stream_token(req)
 
     def _decode_single_request(self, req: GenerationRequest, device: torch.device, batch_size: int = 1):
         """Run one decode step for a request that's already being generated.
