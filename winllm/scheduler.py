@@ -161,7 +161,11 @@ class Scheduler:
 
             # 2. Run one inference step
             try:
-                self.engine.generate_step(self._active_reqs)
+                self.engine.generate_step(
+                    self._active_reqs, 
+                    chunked_prefill_enabled=self.config.chunked_prefill_enabled,
+                    max_num_batched_tokens=self.config.max_num_batched_tokens
+                )
             except Exception as e:
                 logger.exception("Error in inference step")
                 # Fail all active requests in the batch if a global error occurred

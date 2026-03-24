@@ -7,7 +7,8 @@ import logging
 import sys
 
 from .config import QuantizationType
-from .commands import cmd_serve, cmd_chat, cmd_benchmark, cmd_list, cmd_detect
+from .commands import cmd_serve, cmd_chat, cmd_benchmark, cmd_list, cmd_detect, cmd_remove
+from . import __version__
 
 # Windows console encoding fix
 if sys.platform == "win32":
@@ -52,9 +53,10 @@ def _add_scaling_args(parser):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="winllm",
-        description="WinLLM — Windows-native LLM inference engine",
+        prog="wLLM",
+        description="wLLM — Windows-native LLM inference engine",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # --- serve ---
@@ -91,6 +93,10 @@ def main():
     detect_parser.add_argument("--json", action="store_true", help="Also print JSON output")
     detect_parser.add_argument("--verbose", "-v", action="store_true")
 
+    # --- remove ---
+    remove_parser = subparsers.add_parser("remove", help="Remove a downloaded model from HuggingFace cache")
+    remove_parser.add_argument("model", help="Model ID to remove, e.g., 'mistralai/Mistral-7B-v0.1'")
+
     args = parser.parse_args()
 
     if not args.command:
@@ -104,7 +110,8 @@ def main():
         "chat": cmd_chat,
         "benchmark": cmd_benchmark,
         "list": cmd_list,
-        "detect": cmd_detect
+        "detect": cmd_detect,
+        "remove": cmd_remove
     }
     cmd_map[args.command](args)
 

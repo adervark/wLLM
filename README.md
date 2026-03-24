@@ -15,6 +15,15 @@ Built with PyTorch + CUDA + HuggingFace Transformers. Provides an OpenAI-compati
 - **torch.compile support** — reduces Python overhead via graph optimization
 - **Interactive CLI** — chat directly in your terminal
 
+## Why wLLM? (vs. Ollama)
+
+While tools like Ollama are fantastic for consumer-friendly local generation using `.gguf` archives, **wLLM is engineered for developers, rapid prototyping, and highly concurrent API serving**:
+
+- **Zero-Day Model Support**: Instead of waiting for community quantizations or manually converting models to `.gguf`, wLLM uses HuggingFace natively. Any new PyTorch model uploaded to the hub can be served instantly.
+- **Infinitely Hackable**: Written entirely in pure Python and PyTorch. If you want to modify the batching scheduler, add new logit processors, or inject memory optimizations, you don't need to write C/C++ or recompile `llama.cpp`.
+- **Server-Grade Continuous Batching**: Built as a Windows-native, lightweight equivalent to vLLM. It features iteration-level continuous batching and PagedMemory allocation, designed to handle concurrent API requests on consumer GPUs without hanging.
+- **Out-of-the-Box Speculative Decoding**: Accelerate massive models by leveraging smaller draft models to verify tokens in a single forward pass, integrated natively within PyTorch.
+
 ## Quick Start
 
 ### Install
