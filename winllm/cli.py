@@ -39,6 +39,13 @@ def _add_common_model_args(parser):
 
 def _add_scaling_args(parser):
     """Add common scaling arguments to a subparser."""
+    parser.add_argument("--attention-backend", default="auto",
+                        choices=["auto", "sdpa", "flash_attention_2", "eager"],
+                        help="Attention backend: auto, sdpa, flash_attention_2, eager")
+    parser.add_argument("--compile", action="store_true",
+                        help="Use torch.compile for graph optimization")
+    parser.add_argument("--draft-model", default=None,
+                        help="Path to draft model for speculative decoding")
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1,
                         help="Number of GPUs for tensor parallelism")
     parser.add_argument("--device-map-strategy", choices=["auto", "balanced", "balanced_low_0", "sequential"],
@@ -95,7 +102,8 @@ def main():
 
     # --- remove ---
     remove_parser = subparsers.add_parser("remove", help="Remove a downloaded model from HuggingFace cache")
-    remove_parser.add_argument("model", help="Model ID to remove, e.g., 'mistralai/Mistral-7B-v0.1'")
+    remove_parser.add_argument("model", nargs="?", help="Model ID to remove, e.g., 'mistralai/Mistral-7B-v0.1'")
+    remove_parser.add_argument("--all", action="store_true", help="Remove all downloaded models from HuggingFace cache")
 
     args = parser.parse_args()
 

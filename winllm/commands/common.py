@@ -27,6 +27,13 @@ def build_model_config(args) -> ModelConfig:
     if hasattr(args, "gpu_memory_utilization") and args.gpu_memory_utilization is not None:
         kwargs["gpu_memory_utilization"] = args.gpu_memory_utilization
 
+    if hasattr(args, "attention_backend") and args.attention_backend:
+        kwargs["attention_backend"] = args.attention_backend
+    if hasattr(args, "compile") and args.compile:
+        kwargs["compile"] = args.compile
+    if hasattr(args, "draft_model") and args.draft_model:
+        kwargs["draft_model_name_or_path"] = args.draft_model
+
     kwargs["tensor_parallel_size"] = args.tensor_parallel_size
     kwargs["device_map_strategy"] = args.device_map_strategy
     kwargs["cpu_offload"] = args.cpu_offload
