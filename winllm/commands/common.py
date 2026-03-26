@@ -29,8 +29,6 @@ def build_model_config(args) -> ModelConfig:
 
     if hasattr(args, "attention_backend") and args.attention_backend:
         kwargs["attention_backend"] = args.attention_backend
-    if hasattr(args, "compile") and args.compile:
-        kwargs["compile"] = args.compile
     if hasattr(args, "draft_model") and args.draft_model:
         kwargs["draft_model_name_or_path"] = args.draft_model
 

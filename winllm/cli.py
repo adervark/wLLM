@@ -31,7 +31,7 @@ def setup_logging(verbose: bool = False):
 def _add_common_model_args(parser):
     """Add model-related arguments shared by serve, chat, and benchmark."""
     parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
-    parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit"], default="auto")
+    parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit", "awq", "gptq"], default="auto")
     parser.add_argument("--max-model-len", type=int, default=None, help="Auto-detected if not specified")
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--verbose", "-v", action="store_true")
@@ -42,8 +42,6 @@ def _add_scaling_args(parser):
     parser.add_argument("--attention-backend", default="auto",
                         choices=["auto", "sdpa", "flash_attention_2", "eager"],
                         help="Attention backend: auto, sdpa, flash_attention_2, eager")
-    parser.add_argument("--compile", action="store_true",
-                        help="Use torch.compile for graph optimization")
     parser.add_argument("--draft-model", default=None,
                         help="Path to draft model for speculative decoding")
     parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1,

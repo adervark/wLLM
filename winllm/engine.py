@@ -74,7 +74,6 @@ class InferenceEngine:
             )
 
         self._init_speculative_engine()
-        self._try_compile_model()
 
         self._ready = True
         logger.info("InferenceEngine ready. GPU: %s", get_gpu_memory_info())
@@ -89,17 +88,6 @@ class InferenceEngine:
                 tokenizer=self.tokenizer
             )
             logger.info("Speculative decoding enabled using draft model")
-
-    def _try_compile_model(self):
-        """Optionally compile the model with torch.compile for faster inference."""
-        if not self.model_config.compile:
-            return
-        logger.info("Compiling model with torch.compile (mode=reduce-overhead)...")
-        try:
-            self.model = torch.compile(self.model, mode="reduce-overhead")
-            logger.info("Model compilation scheduled (will occur during first forward pass)")
-        except Exception as e:
-            logger.warning("Failed to compile model: %s. Falling back to eager mode.", e)
 
     def unload_model(self):
         """Unload model and free resources."""
