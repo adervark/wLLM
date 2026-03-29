@@ -197,7 +197,7 @@ class InferenceEngine:
             req.output_token_ids.append(next_token_id.item())
 
             prompt_text = self.tokenizer.decode(req.prompt_token_ids, skip_special_tokens=True)
-            req._prefix_len = len(prompt_text)
+            req._stream_text_cursor = len(prompt_text)
             self._emit_stream_token(req)
 
     def _decode_single_request(self, req: GenerationRequest, device: torch.device, batch_size: int = 1):
@@ -263,10 +263,10 @@ class InferenceEngine:
         full_ids = request.prompt_token_ids + request.output_token_ids
         current_text = self.tokenizer.decode(full_ids, skip_special_tokens=True)
 
-        if len(current_text) > request._prefix_len:
-            new_text = current_text[request._prefix_len:]
+        if len(current_text) > request._stream_text_cursor:
+            new_text = current_text[request._stream_text_cursor:]
             request._stream_callback(new_text, False)
-            request._prefix_len = len(current_text)
+            request._stream_text_cursor = len(current_text)
 
     # ------------------------------------------------------------------
     # Full single-request generation (blocking)

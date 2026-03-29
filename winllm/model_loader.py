@@ -148,17 +148,6 @@ class ModelLoader:
 
         t0 = time.perf_counter()
 
-        # --- Load tokenizer ---
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            self.config.model_name_or_path,
-            trust_remote_code=self.config.trust_remote_code,
-        )
-
-        # Ensure pad_token is set (many models don't have one by default)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-
         # --- Build quantization config ---
         quantization_config = _build_quantization_config(self.config)
 
@@ -177,6 +166,10 @@ class ModelLoader:
         else:
             load_kwargs["torch_dtype"] = self.config.torch_dtype
 
+        # Optimized Attention Backend (SDPA, Flash Attention 2)
+        if self.config.attention_backend and self.config.attention_backend != "auto":
+            load_kwargs["attn_implementation"] = self.config.attention_backend
+        
         # Tensor parallelism (requires transformers >= 4.45)
         if self.config.tensor_parallel_size > 1:
             try:
@@ -190,8 +183,15 @@ class ModelLoader:
             load_kwargs["offload_folder"] = "offload_weights"
             logger.info("CPU offload enabled -- excess layers will spill to RAM")
 
-        self.model = AutoModelForCausalLM.from_pretrained(**load_kwargs)
-        self.model.eval()
+        from .backend import BackendFactory
+        self.model, self.tokenizer = BackendFactory.load(self.config, **load_kwargs)
+        if hasattr(self.model, "eval"):
+            self.model.eval()
+
+        # Ensure pad_token is set (many models don't have one by default)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
 
         elapsed = time.perf_counter() - t0
         mem_after = get_aggregate_gpu_memory()

@@ -10,6 +10,7 @@ def cmd_serve(args):
     import uvicorn
     from ..config import ServerConfig, SchedulerConfig, KVCacheConfig
     from ..api_server import create_app
+    from .. import __version__
 
     model_config = build_model_config(args)
 
@@ -33,7 +34,7 @@ def cmd_serve(args):
     offload_str = ", cpu_offload=on" if model_config.cpu_offload else ""
 
     print(f"""
-WinLLM v0.1.0
+WinLLM v{__version__}
 --------------------------------------------------------------
   Model:    {args.model}
   Quant:    {model_config.quantization.value}

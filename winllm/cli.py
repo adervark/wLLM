@@ -54,6 +54,9 @@ def _add_scaling_args(parser):
                         help="Device to use: auto, cuda, cuda:0, cpu")
     parser.add_argument("--auto-config", action="store_true",
                         help="Auto-detect hardware and set optimal config")
+    parser.add_argument("--backend", default="pytorch",
+                        choices=["pytorch", "onnxruntime", "directml"],
+                        help="Inference backend: pytorch, onnxruntime, directml")
 
 
 def main():

@@ -51,9 +51,11 @@ class GenerationRequest:
 
     # Internal state for batching
     _past_key_values: Optional[tuple] = field(default=None, repr=False)
-    _prefix_len: int = field(default=0, repr=False)
+    _prefix_cache_token_len: int = field(default=0, repr=False)
+    _stream_text_cursor: int = field(default=0, repr=False)
     _prefix_past_key_values: Optional[tuple] = field(default=None, repr=False)
     _prefill_cursor: int = field(default=0, repr=False)
+    _draft_past_key_values: Optional[tuple] = field(default=None, repr=False)
 
     @property
     def is_prefill_complete(self) -> bool:

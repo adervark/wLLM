@@ -13,7 +13,7 @@ This document provides a comprehensive, visual guide to the software architectur
 
 ## 1. High-Level System Architecture
 
-At its core, WinLLM is divided into three main layers: the API Layer (FastAPI), the Core Engine (Request Scheduling & Memory Management), and the Inference Engine (PyTorch Generation Loop).
+At its core, WinLLM is divided into three main layers: the API Layer (FastAPI), the Core Engine (Request Scheduling & Memory Management), and the Inference Layer (Multi-Backend Generation Loop).
 
 ```mermaid
 flowchart TB
@@ -36,6 +36,7 @@ flowchart TB
         Loop["Inference Loop (Continuous Batching)"]
         SpecEngine["speculative.py (Speculative Decoding)"]
         Engine["engine.py (Batched Generation)"]
+        Backend["backend.py (PyTorch / ONNX / DirectML)"]
         Loader["model_loader.py (Draft Support)"]
         Sample["sampler.py (Logits to Tokens)"]
     end
@@ -57,10 +58,12 @@ flowchart TB
     Loop -->|Calls generate_step| Engine
     Loop <-->|Verification Loop| SpecEngine
     
-    Engine <-->|Queries Weights| Loader
     Engine <-->|Computes next token| Sample
     Engine -.->|Claims/Frees Blocks| KVManager
     Engine -.->|Updates Request State| Schedule
+    
+    Loader -->|Delegates to| Backend
+    Backend -->|Returns Model + Tokenizer| Loader
 
     Hardware -->|Builds Defaults| Config
     Config -->|Applies overrides| Registry
@@ -161,7 +164,7 @@ classDiagram
     class ModelConfig {
         +str model_name_or_path
         +str draft_model_name_or_path
-        +bool compile
+        +str inference_backend
         +QuantizationType quantization
         +apply_hardware_defaults(defaults)
     }
@@ -179,7 +182,9 @@ classDiagram
         +list[int] output_token_ids
         +RequestStatus status
         +tuple _past_key_values
-        +int _prefix_len
+        +int _prefix_cache_token_len
+        +int _stream_text_cursor
+        +tuple _draft_past_key_values
     }
 
     class HardwareDefaults {
@@ -203,6 +208,7 @@ classDiagram
         +Thread _loop_thread
         +submit(request)
         -_run_inference_loop()
+        -_evict_completed()
     }
     
     class KVCacheManager {
@@ -239,6 +245,16 @@ classDiagram
     InferenceEngine *-- SpeculativeEngine : Initializes
     Scheduler o-- InferenceEngine : Calls generate_step()
     
+    class BackendFactory {
+        +load(model_config) Model, Tokenizer
+        -_load_pytorch()
+        -_load_onnxruntime()
+        -_load_directml()
+        -_load_tokenizer()
+    }
+    
+    ModelLoader --> BackendFactory : Delegates loading
+    
     %% API entry point
     class APIServer {
         +chat_completions(req)
@@ -268,7 +284,13 @@ classDiagram
 - **`generate_step()`**: The primary entry point for inference. It takes a *list* of requests and performs one iteration of prefill or decode for all of them.
 - **Decomposed internals**: The main generation pipeline is broken into focused helpers: `_validate_prompt()`, `_allocate_kv_cache()`, `_run_decode_loop()`, and `_finalize_generation()`, making the code easy to follow step by step.
 - **`_prefill_single_request()` / `_decode_single_request()`**: Extracted from `generate_step()` for clarity.
-- **Integrated `torch.compile`**: Supports compiling the forward pass into optimized kernels via `_try_compile_model()`.
+
+### [`backend.py`](../winllm/backend.py) | Multi-Backend Model Loading
+- **`BackendFactory`**: Factory class that abstracts model loading across three inference backends:
+  - **PyTorch** (default): Standard HuggingFace `AutoModelForCausalLM` with quantization and multi-GPU support.
+  - **ONNX Runtime**: Uses Optimum's `ORTModelForCausalLM` for Windows-native acceleration without Triton/MSVC. Includes smart handling of pre-exported ONNX repositories (e.g., LiquidAI models with `subfolder` and `file_name` routing).
+  - **DirectML**: Uses `torch-directml` for cross-vendor GPU acceleration via DX12.
+- **Tokenizer Fallback**: Built-in workaround for the Optimum `TokenizersBackend` bug on ONNX-exported models — automatically falls back to the base model's tokenizer.
 
 ### [`speculative.py`](../winllm/speculative.py) | Accelerated Generation
 - **Draft Model Logic**: Implements speculative decoding where a smaller model proposes tokens that the larger target model verifies in a single forward pass.

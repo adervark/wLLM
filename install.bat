@@ -35,7 +35,7 @@ echo.
 echo [2/4] Installing PyTorch with CUDA 12.4 support...
 echo This may take a few minutes as PyTorch is a large download.
 call .venv\Scripts\activate.bat
-uv pip install torch --link-mode=copy --extra-index-url https://download.pytorch.org/whl/cu124
+uv pip install torch torchvision torchaudio --link-mode=copy --extra-index-url https://download.pytorch.org/whl/cu124
 
 echo.
 echo [3/4] Installing wLLM and its dependencies...

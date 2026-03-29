@@ -243,7 +243,7 @@ class KVCacheManager:
         return True
 
     def _update_allocated_count(self):
-        self._allocated_blocks = len([b for b in self._block_pool.values() if b.ref_count > 0])
+        self._allocated_blocks = sum(1 for b in self._block_pool.values() if b.ref_count > 0)
 
     def match_prefix(self, prefix_hashes: list[int]) -> tuple[list[KVBlock], Optional[tuple]]:
         """Find the longest matching prefix sequence of blocks and its tensors."""
@@ -351,5 +351,9 @@ class KVCacheManager:
 
     def reset(self):
         self._sequences.clear()
+        self._block_pool.clear()
+        self._prefix_cache_blocks.clear()
+        self._prefix_cache_tensors.clear()
+        self._next_block_id = 0
         self._allocated_blocks = 0
         logger.info("KV cache reset")

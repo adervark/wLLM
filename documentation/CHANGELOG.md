@@ -4,6 +4,76 @@ All notable changes to WinLLM are documented here.
 
 ---
 
+## [1.0.0] - 2026-03-30
+### Production Hardening — Codebase Audit & Test Expansion
+
+#### Fixed
+- **Silent quantization drop** (`commands/common.py`) — CLI `--quantization awq|gptq` choices were missing from `QUANT_MAP`, causing them to be silently dropped to `auto`. Added both mappings.
+- **Duplicate tokenizer loading** (`model_loader.py`) — `ModelLoader.load()` was loading the tokenizer twice: once directly and once via `BackendFactory`. The `pad_token` fix was applied to the first (discarded) copy. Now correctly delegates to `BackendFactory` and applies fixes post-load.
+- **`_prefix_len` semantic conflict** (`types.py`, `engine.py`, `scheduler.py`) — `GenerationRequest._prefix_len` was used as a token count by the scheduler and a character count by the engine's streaming logic, causing corrupt streaming output. Split into `_prefix_cache_token_len` (scheduler) and `_stream_text_cursor` (engine).
+- **Scheduler memory leak** (`scheduler.py`) — `_evict_completed()` was defined but never called. Completed requests accumulated unbounded in long-running servers. Now called automatically.
+- **`num_running` always returned 0** (`scheduler.py`) — Dead `_running` dictionary was never populated. Removed entirely; active request count is now derived from `_active_reqs`.
+- **Unchecked `IndexError` crash** (`scheduler.py`) — `output_token_ids[-1]` was accessed without checking for empty list. Added bounds check.
+- **KV cache `reset()` left stale state** (`kv_cache.py`) — `reset()` did not clear `_block_pool`, `_prefix_cache_blocks`, `_prefix_cache_tensors`, or reset `_next_block_id`. All four are now properly cleared.
+- **Missing `_draft_past_key_values` field** (`types.py`) — `SpeculativeEngine` relied on an undeclared attribute. Added to `GenerationRequest` dataclass.
+- **Hardcoded version strings** (`api_server.py`, `commands/serve.py`) — Replaced stale `v0.1.0` with dynamic `winllm.__version__`.
+- **Unused imports** (`utils.py`, `device.py`) — Removed `Union`, `json`, and `Path`.
+- **Unprofessional comment** (`commands/__init__.py`) — Removed.
+
+#### Changed
+- **KV cache block counting** (`kv_cache.py`) — Replaced throwaway list comprehension in `_update_allocated_count` with a generator expression.
+- **Scheduler docstring** (`scheduler.py`) — Added clarifying docstring to `submit_streaming` explaining it is a semantic wrapper.
+
+#### Added — Test Suite (66 → 226 tests)
+- **`test_types.py`** (29 tests) — `GenerationRequest` lifecycle, `RequestStatus` enum, cancellation thread safety, timing properties.
+- **`test_engine.py`** (19 tests) — `InferenceEngine` with mocked backends: load, generate, streaming, EOS, max tokens, error propagation.
+- **`test_backend.py`** (9 tests) — `BackendFactory` dispatch, tokenizer loading, ONNX fallback, ONNX routing for LiquidAI models.
+- **`test_scheduler.py`** (14 tests) — `_get_prefix_hashes` correctness (empty, partial, deterministic), `SchedulerStats` calculations and `to_dict` format.
+- **`test_speculative.py`** (11 tests) — Draft proposals, verification input shape, accept/reject logic, EOS termination, bonus sampling.
+- **`test_api_server.py`** (15 tests) — Pydantic model serialization, OpenAI response format contract compliance.
+- **`test_cli.py`** (16 tests) — Version output, subcommand registration, arg group validation, quantization/backend choices.
+- **`test_kv_cache.py`** (+24 tests) — Prefix caching lifecycle, reset completeness (block pool, prefix caches, block ID counter), edge cases (double alloc, nonexistent free).
+- **`test_sampler.py`** (+9 tests) — Full pipeline integration, greedy+repetition penalty interaction, high-temperature variety, top-k=1 edge case, logits immutability.
+
+#### Removed
+- **`test_combined.py`** — Duplicated `test_registry.py` tests and required real model downloads. Superseded by modular test files.
+
+#### Documentation
+- **`README.md`** — Removed `torch.compile` feature mention, added multi-backend and prefix caching, expanded architecture diagram, added all 13 test file descriptions, added documentation section links.
+- **`Architecture.md`** — Updated `GenerationRequest` class diagram to show `_prefix_cache_token_len`, `_stream_text_cursor`, `_draft_past_key_values`; Added `_evict_completed()` to `Scheduler` class.
+- **`WALKTHROUGH.md`** — Updated project structure listing with all 13 test files (7 new), corrected key files table with post-refactoring field names and responsibilities.
+- **`Genesys.md`** — Replaced `torch.compile` chapter with multi-backend acceleration; added prefix caching to continuous batching section; updated vLLM comparison table; fixed concept-to-code map (`asyncio.Semaphore` → dynamic KV admission, added `BackendFactory` and prefix caching entries).
+- **`CHANGELOG.md`** — This entry.
+
+---
+
+
+## [0.5.0] - 2026-03-29
+### Multi-Backend Architecture & Windows Stability
+
+#### Added
+- **Multi-Backend Model Loading** (`backend.py` — NEW MODULE) — `BackendFactory` abstracts model loading across three inference backends: **PyTorch** (default), **ONNX Runtime** (via Optimum), and **DirectML** (via torch-directml). Selected via `--backend pytorch|onnxruntime|directml`.
+- **`--backend` CLI flag** (`cli.py`) — New option on `serve`, `chat`, and `benchmark` commands for selecting the inference backend.
+- **`inference_backend` config field** (`config.py`) — Added to `ModelConfig` to persist backend selection.
+- **ONNX Export Script** (`compile_onnx.py` — NEW FILE) — Standalone script to export HuggingFace models to ONNX format using `optimum-cli`.
+- **LiquidAI ONNX Auto-Routing** (`backend.py`) — Smart handling of LiquidAI's ONNX repository structure: automatically selects the correct pre-quantized binary (`model_q4.onnx`, `model_q8.onnx`, `model.onnx`) based on the `--quantization` setting, with proper `subfolder` and `file_name` routing.
+- **Tokenizer Fallback** (`backend.py`, `model_loader.py`) — Built-in workaround for the Optimum `TokenizersBackend` bug on ONNX-exported models. Automatically falls back to the base model's tokenizer when the ONNX variant's `tokenizer_config.json` is corrupt.
+- **`remove` command** (`cli.py`, `commands/remove.py`) — New CLI command to remove specific downloaded models (`wllm remove <model_id>`) or all cached models (`wllm remove --all`).
+- **Safe `.eval()` guard** (`model_loader.py`) — `ORTModelForCausalLM` does not support `.eval()`, so model loading now checks `hasattr(model, "eval")` before calling it.
+
+#### Removed
+- **`torch.compile` support** (`engine.py`, `config.py`, `cli.py`) — The `--compile` flag and `_try_compile_model()` method have been completely removed. `torch.compile` was fundamentally broken on Windows due to missing Triton backend and MSVC compiler requirements. The multi-backend architecture replaces this with stable, native acceleration paths.
+- **`compile` field** (`config.py`) — Removed from `ModelConfig` dataclass.
+
+#### Changed
+- **`model_loader.py`** — `BackendFactory.load()` is now called instead of direct `AutoModelForCausalLM.from_pretrained()`, enabling backend-agnostic model loading.
+
+#### Documentation
+- **`Architecture.md`** — Updated system architecture diagram to include `backend.py` in the inference layer. Added `BackendFactory` to the class diagram. Removed `torch.compile` references.
+- **`COMMANDS.md`** — Removed `--compile` flag from all command option tables. Added `--backend` flag. Added `remove` command documentation.
+- **`WALKTHROUGH.md`** — Rewrote performance section to replace `torch.compile` advice with backend selection and unquantized inference strategies. Added new "Inference Backends" section. Updated project structure to include `backend.py`, `compile_onnx.py`, and `remove.py`.
+- **`CHANGELOG.md`** — This entry.
+
 ## [0.4.1] - 2026-03-18
 ### Code Clarity and Readability Refactoring
 
@@ -40,7 +110,7 @@ All notable changes to WinLLM are documented here.
 
 #### Added
 - **Continuous Batching** (`scheduler.py`, `engine.py`) — Completely refactored the request scheduler to use a centralized `InferenceLoop`. Multiple requests are now admitted into a single batch and processed concurrently, dramatically increasing throughput.
-- **`torch.compile` Support** (`engine.py`, `config.py`, `cli.py`) — Integrated PyTorch 2.0+ graph compilation. Use the `--compile` flag to fuse kernels and reduce Python overhead (requires warm-up on first prompt).
+- **~~`torch.compile` Support~~ (Removed in v0.5.0)** (`engine.py`, `config.py`, `cli.py`) — *Originally integrated PyTorch 2.0+ graph compilation. Removed due to Windows incompatibility with Triton/MSVC backends.*
 - **Speculative Decoding** (`speculative.py`, `model_loader.py`, `engine.py`) — Support for using a smaller "draft" model to accelerate generation of a larger "target" model. Enabled via the `--draft-model` flag.
 - **Comparative Benchmarking** (`tests/benchmark_throughput.py`) — New script to measure and compare TPS (Tokens Per Second) and TTFT (Time To First Token) with different optimization settings.
 

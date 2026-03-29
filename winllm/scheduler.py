@@ -70,7 +70,6 @@ class Scheduler:
 
         # Request queues
         self._waiting: deque[GenerationRequest] = deque()
-        self._running: dict[str, GenerationRequest] = {}
         self._completed: dict[str, tuple[float, GenerationRequest]] = {}  # req_id -> (finished_time, request)
 
         # Concurrency control
@@ -96,7 +95,7 @@ class Scheduler:
 
     @property
     def num_running(self) -> int:
-        return len(self._running)
+        return len(self._active_reqs)
 
     def _start_loop(self):
         """Start the background inference loop thread."""
@@ -125,7 +124,7 @@ class Scheduler:
                 matched_blocks, matched_tensors = self.engine.kv_cache_manager.match_prefix(prefix_hashes)
                 matched_len = len(matched_blocks) * block_size
                 
-                req._prefix_len = matched_len
+                req._prefix_cache_token_len = matched_len
                 req._prefix_past_key_values = matched_tensors
                 
                 prompt_len = len(prompt_token_ids)
@@ -176,6 +175,8 @@ class Scheduler:
             # 3. Check for finished/cancelled requests
             finished = []
             for req in self._active_reqs:
+                if not req.output_token_ids:
+                    continue
                 is_eos = req.output_token_ids[-1] == self.engine.tokenizer.eos_token_id
                 is_max = len(req.output_token_ids) >= req.sampling_params.max_tokens
                 
@@ -200,6 +201,9 @@ class Scheduler:
                 self._active_reqs.remove(req)
                 self.engine.kv_cache_manager.free_sequence(req.request_id)
                 self._handle_completed(req)
+
+            # 5. Evict old completed requests to prevent memory leaks
+            self._evict_completed()
 
     def _try_promote_prefix_cache(self, req: GenerationRequest):
         """Try to save this request's prompt KV tensors in the prefix cache.
@@ -270,17 +274,23 @@ class Scheduler:
         return request
 
     async def submit_streaming(self, request: GenerationRequest):
-        """Submit a request and stream tokens via the request's callback."""
-        # Same flow as submit but returns once the background loop starts processing it
-        # Actually, for consistency, we wait until it's finished.
+        """Submit a request that streams tokens via the request's callback.
+
+        This is a thin wrapper around submit() for semantic clarity at call sites.
+        Streaming behavior is determined by the request's _token_callback or
+        _stream_callback being set before submission. The scheduler's inference
+        loop invokes these callbacks as tokens are generated, regardless of which
+        submission method is used.
+        """
         return await self.submit(request)
 
     def get_request(self, request_id: str) -> Optional[GenerationRequest]:
         """Get a request by ID from any queue."""
-        if request_id in self._running:
-            return self._running[request_id]
         if request_id in self._completed:
             return self._completed[request_id][1]
+        for req in self._active_reqs:
+            if req.request_id == request_id:
+                return req
         for req in self._waiting:
             if req.request_id == request_id:
                 return req

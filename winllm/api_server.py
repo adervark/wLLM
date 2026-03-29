@@ -21,6 +21,7 @@ from .model_loader import get_gpu_memory_info
 from .scheduler import Scheduler
 from .types import GenerationRequest
 from .utils import format_chat_prompt
+from . import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +143,7 @@ def create_app(
     app = FastAPI(
         title="WinLLM",
         description="Windows-native LLM inference engine — OpenAI-compatible API",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
 

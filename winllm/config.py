@@ -34,6 +34,7 @@ class ModelConfig:
     trust_remote_code: bool = False
     device: str = "auto"                    # "auto", "cuda", "cuda:0", "cpu"
     gpu_memory_utilization: float = 0.90
+    inference_backend: str = "pytorch"       # "pytorch", "onnxruntime", "directml"
     # --- Multi-GPU / scaling ---
     tensor_parallel_size: int = 1           # Number of GPUs for tensor parallelism
     device_map_strategy: str = "auto"       # "auto", "balanced", "balanced_low_0", "sequential"

@@ -10,6 +10,8 @@ QUANT_MAP = {
     "none": QuantizationType.NONE,
     "4bit": QuantizationType.NF4,
     "8bit": QuantizationType.INT8,
+    "awq": QuantizationType.AWQ,
+    "gptq": QuantizationType.GPTQ,
 }
 
 
@@ -36,6 +38,8 @@ def build_model_config(args) -> ModelConfig:
     kwargs["device_map_strategy"] = args.device_map_strategy
     kwargs["cpu_offload"] = args.cpu_offload
     kwargs["device"] = args.device
+    if hasattr(args, "backend"):
+        kwargs["inference_backend"] = args.backend
 
     return ModelConfig(**kwargs)
 

@@ -7,6 +7,7 @@ from .list import cmd_list
 from .detect import cmd_detect
 from .remove import cmd_remove
 
+
 __all__ = [
     "cmd_serve",
     "cmd_chat",
