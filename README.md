@@ -22,7 +22,7 @@ While tools like Ollama are fantastic for consumer-friendly local generation usi
 
 - **Zero-Day Model Support**: Instead of waiting for community quantizations or manually converting models to `.gguf`, wLLM uses HuggingFace natively. Any new PyTorch model uploaded to the hub can be served instantly.
 - **Infinitely Hackable**: Written entirely in pure Python and PyTorch. If you want to modify the batching scheduler, add new logit processors, or inject memory optimizations, you don't need to write C/C++ or recompile `llama.cpp`.
-- **Server-Grade Continuous Batching**: Built as a Windows-native, lightweight equivalent to vLLM. It features iteration-level continuous batching and paged memory allocation, designed to handle concurrent API requests on consumer GPUs without hanging.
+- **Server-Grade Continuous Batching**: Built as a Windows-native, lightweight equivalent to vLLM. It features iteration-level continuous batching, O(1) memory pool tracking, zero-fragmentation tensor batching, and decoupled async generators, designed to handle concurrent API requests on consumer GPUs without hanging.
 - **Out-of-the-Box Speculative Decoding**: Accelerate massive models by leveraging smaller draft models to verify tokens in a single forward pass, integrated natively within PyTorch.
 - **Multi-Backend Flexibility**: Choose between PyTorch, ONNX Runtime, or DirectML for the inference backend that best suits your hardware and model.
 
@@ -115,7 +115,7 @@ Request → API Server → Scheduler (Waiting Queue)
 
 ## Testing
 
-The test suite includes **226 tests** covering all core modules:
+The test suite includes **231 tests** covering all core modules:
 
 ```bash
 # Using uv (recommended)

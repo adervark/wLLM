@@ -20,8 +20,8 @@ class TestApplyTemperature:
 
     def test_temperature_higher(self):
         logits = torch.tensor([[1.0, 2.0, 3.0]])
-        result = apply_temperature(logits, 2.0)
         expected = logits / 2.0
+        result = apply_temperature(logits.clone(), 2.0)
         assert torch.allclose(result, expected)
 
     def test_temperature_zero_passthrough(self):
@@ -229,10 +229,12 @@ class TestBatchedSampler:
             [2.0, 4.0, 6.0],
             [2.0, 4.0, 6.0]
         ])
+        expected_0 = logits[0] / 2.0
+        expected_1 = logits[1] / 0.5
         temps = [2.0, 0.5]
-        result = apply_temperature(logits, temps)
-        assert torch.allclose(result[0], logits[0] / 2.0)
-        assert torch.allclose(result[1], logits[1] / 0.5)
+        result = apply_temperature(logits.clone(), temps)
+        assert torch.allclose(result[0], expected_0)
+        assert torch.allclose(result[1], expected_1)
 
     def test_batched_top_k(self):
         logits = torch.tensor([

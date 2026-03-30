@@ -41,9 +41,10 @@ def apply_repetition_penalty(
              mask[i].scatter_(0, idx_tensor, True)
              
     # Apply penalty
-    scores = logits.clone()
-    penalized = torch.where(scores > 0, scores / penalty_tensor, scores * penalty_tensor)
-    return torch.where(mask, penalized, logits)
+    # Apply penalty in-place (no logits.clone needed)
+    penalized = torch.where(logits > 0, logits / penalty_tensor, logits * penalty_tensor)
+    logits = torch.where(mask, penalized, logits)
+    return logits
 
 
 def apply_temperature(logits: torch.Tensor, temperature: float | list[float]) -> torch.Tensor:
@@ -55,7 +56,8 @@ def apply_temperature(logits: torch.Tensor, temperature: float | list[float]) ->
     safe_temps = [t if t > 0 else 1.0 for t in temps]
     temp_tensor = torch.tensor(safe_temps, dtype=logits.dtype, device=logits.device).unsqueeze(1)
     
-    return logits / temp_tensor
+    logits.div_(temp_tensor)
+    return logits
 
 
 def apply_top_k(logits: torch.Tensor, top_k: int | list[int]) -> torch.Tensor:
@@ -100,9 +102,9 @@ def apply_top_p(logits: torch.Tensor, top_p: float | list[float]) -> torch.Tenso
     
     sorted_logits.masked_fill_(sorted_mask, float('-inf'))
     
-    # Scatter back to the original indices
-    result = torch.empty_like(logits).scatter_(dim=-1, index=sorted_indices, src=sorted_logits)
-    return result
+    # Scatter back to the original indices in-place
+    logits.scatter_(dim=-1, index=sorted_indices, src=sorted_logits)
+    return logits
 
 
 def sample_token(

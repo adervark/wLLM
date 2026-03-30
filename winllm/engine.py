@@ -263,22 +263,24 @@ class InferenceEngine:
         batched_past_key_values = []
         num_layers = len(decode_reqs[0]._past_key_values)
         
+        # Extract shapes dynamically from the first valid state to handle any attention architecture
+        sample_k = decode_reqs[0]._past_key_values[0][0]
+        num_kv_heads = sample_k.shape[1]
+        head_dim = sample_k.shape[3]
+        kv_dtype = sample_k.dtype
+        
         for layer_idx in range(num_layers):
-            keys = []
-            vals = []
+            # Pre-allocate batched continuous tensors (bypasses thousands of internal F.pad memory allocations)
+            batched_k = torch.zeros((batch_size, num_kv_heads, max_prompt_len, head_dim), dtype=kv_dtype, device=device)
+            batched_v = torch.zeros((batch_size, num_kv_heads, max_prompt_len, head_dim), dtype=kv_dtype, device=device)
+            
             for i, req in enumerate(decode_reqs):
                 k, v = req._past_key_values[layer_idx]
-                pad_len = max_prompt_len - seq_lengths[i]
-                if pad_len > 0:
-                    k = F.pad(k, (0, 0, pad_len, 0))
-                    v = F.pad(v, (0, 0, pad_len, 0))
-                keys.append(k)
-                vals.append(v)
+                seq_len = seq_lengths[i]
+                batched_k[i:i+1, :, -seq_len:, :] = k
+                batched_v[i:i+1, :, -seq_len:, :] = v
             
-            batched_past_key_values.append((
-                torch.cat(keys, dim=0),
-                torch.cat(vals, dim=0)
-            ))
+            batched_past_key_values.append((batched_k, batched_v))
 
         # Create attention mask
         attention_mask = torch.zeros((batch_size, max_prompt_len + 1), dtype=torch.long, device=device)
