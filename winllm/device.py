@@ -81,6 +81,11 @@ class DeviceInfo:
 
         if not torch.cuda.is_available():
             logger.info("No CUDA GPUs detected — running in CPU-only mode")
+            logger.debug("Torch version: %s", torch.__version__)
+            try:
+                logger.debug("CUDA version info: %s", torch.version.cuda)
+            except Exception:
+                pass
             info.defaults = _build_defaults(info)
             return info
 

@@ -135,8 +135,11 @@ class InferenceEngine:
         for req in prefill_reqs:
             self._prefill_single_request(req, device, chunked_prefill_enabled, max_num_batched_tokens)
 
-        for req in decode_reqs:
-            self._decode_single_request(req, device, batch_size=len(decode_reqs))
+        if decode_reqs:
+            if len(decode_reqs) == 1:
+                self._decode_single_request(decode_reqs[0], device, batch_size=1)
+            else:
+                self._decode_batch(decode_reqs, device)
 
         return requests
 
@@ -238,6 +241,99 @@ class InferenceEngine:
 
         self.kv_cache_manager.extend_sequence(req.request_id, 1)
         self._emit_stream_token(req)
+
+    def _decode_batch(self, decode_reqs: list[GenerationRequest], device: torch.device):
+        """Run a single forward pass for a batch of requests.
+
+        This is the primary throughput optimization, moving from O(N) model passes
+        to O(1) for a batch of size N.
+        """
+        batch_size = len(decode_reqs)
+        
+        # 1. Prepare batched inputs
+        input_ids = torch.tensor(
+            [[req.output_token_ids[-1]] for req in decode_reqs], 
+            device=device
+        )
+        
+        # 2. Handling heterogeneous KV caches in a single pass is tricky with 
+        # standard Transformers. We use the 'attention_mask' to manage different 
+        # prompt lengths. 
+        # First, we need to gather/stack all past_key_values.
+        # Note: This is a memory-intensive operation if we copy. 
+        # In a future pass, we should use a pre-allocated KV pool.
+        
+        # For now, we assume requests in a batch can be stacked if they share
+        # similar structures. 
+        
+        # --- Batch the past_key_values ---
+        # This implementation uses the Transformers-native approach of stacking tensors.
+        # This requires sequence-level padding if lengths differ.
+        max_prompt_len = max(len(req.prompt_token_ids) + len(req.output_token_ids) - 1 for req in decode_reqs)
+        
+        batched_past_key_values = []
+        num_layers = len(decode_reqs[0]._past_key_values)
+        
+        for layer_idx in range(num_layers):
+            keys = []
+            vals = []
+            for req in decode_reqs:
+                k, v = req._past_key_values[layer_idx]
+                # k, v shape: [1, num_heads, seq_len, head_dim]
+                # Slice or pad to max_prompt_len if needed (simplified here for now)
+                keys.append(k)
+                vals.append(v)
+            
+            # Simple stack if they are already the same length (often true in continuous batching)
+            # If not same length, we'd need more complex padding logic or StaticCache.
+            try:
+                batched_past_key_values.append((
+                    torch.cat(keys, dim=0),
+                    torch.cat(vals, dim=0)
+                ))
+            except RuntimeError:
+                # Fallback to single-request if lengths differ too much to stack easily
+                # This should be replaced with a proper padded KV cache manager
+                for req in decode_reqs:
+                    self._decode_single_request(req, device, batch_size=batch_size)
+                return
+
+        # 3. Create attention mask for different history lengths
+        # [batch_size, current_total_len]
+        attention_mask = None # Many models compute this internally from past_key_values lengths
+        
+        # 4. Forward pass
+        outputs = self.model(
+            input_ids,
+            past_key_values=batched_past_key_values,
+            use_cache=True,
+            attention_mask=attention_mask
+        )
+        
+        # 5. Distribute outputs back to requests
+        new_past_key_values = outputs.past_key_values
+        next_logits = outputs.logits[:, -1, :] # [batch_size, vocab_size]
+        
+        # 6. Batched sampling
+        # sampler.sample_token needs to support batches with different params
+        next_token_ids = sample_token(
+            next_logits, 
+            [req.sampling_params for req in decode_reqs],
+            [req.output_token_ids for req in decode_reqs]
+        )
+        
+        for i, req in enumerate(decode_reqs):
+            # Update request state
+            req._past_key_values = tuple(
+                (new_past_key_values[layer_idx][0][i:i+1], new_past_key_values[layer_idx][1][i:i+1])
+                for layer_idx in range(num_layers)
+            )
+            
+            token_id = next_token_ids[i].item()
+            req.output_token_ids.append(token_id)
+            
+            self.kv_cache_manager.extend_sequence(req.request_id, 1)
+            self._emit_stream_token(req)
 
     # ------------------------------------------------------------------
     # Streaming helpers

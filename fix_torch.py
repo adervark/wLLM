@@ -5,7 +5,7 @@ def main():
     print("Forcing torch reinstall...")
     cmd = [
         ".venv\\Scripts\\uv.exe", "pip", "install",
-        "torch", "torchvision", "torchaudio", "--reinstall",
+        "torch", "torchvision", "torchaudio", "--reinstall", "--upgrade",
         "--extra-index-url", "https://download.pytorch.org/whl/cu124"
     ]
     with open("fix_torch.log", "w") as f:

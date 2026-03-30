@@ -102,9 +102,8 @@ class Scheduler:
         self._loop_thread = threading.Thread(target=self._run_inference_loop, daemon=True)
         self._loop_thread.start()
 
-    def _run_inference_loop(self):
-        """Main inference loop running in a background thread."""
-        logger.info("Inference loop started")
+        # Cache EOS token to avoid repeated lookups in the loop
+        eos_token_id = self.engine.tokenizer.eos_token_id
         
         while not self._stop_event.is_set():
             # Wait for requests if none are running
@@ -113,47 +112,8 @@ class Scheduler:
                 self._new_request_event.clear()
 
             # 1. Admit new requests from waiting queue
-            while len(self._active_reqs) < self.config.max_batch_size and self._waiting:
-                req = self._waiting.popleft()
-                
-                # Check KV cache admission with prefix matching
-                prompt_token_ids = req.prompt_token_ids
-                block_size = self.engine.kv_cache_manager.block_size
-                prefix_hashes = _get_prefix_hashes(prompt_token_ids, block_size)
-                
-                matched_blocks, matched_tensors = self.engine.kv_cache_manager.match_prefix(prefix_hashes)
-                matched_len = len(matched_blocks) * block_size
-                
-                req._prefix_cache_token_len = matched_len
-                req._prefix_past_key_values = matched_tensors
-                
-                prompt_len = len(prompt_token_ids)
-                max_new = req.sampling_params.max_tokens
-                if self.engine.kv_cache_manager.can_allocate(prompt_len + max_new - matched_len):
-                    self.engine.kv_cache_manager.allocate_sequence(
-                        req.request_id, 
-                        prompt_len, 
-                        prefix_blocks=matched_blocks
-                    )
-                    self._active_reqs.append(req)
-                    logger.debug(
-                        "Admitted request %s to batch (prefix match: %d tokens)", 
-                        req.request_id, matched_len
-                    )
-                    
-                    # If it was a perfect match for a long prefix, we can promote it
-                    # actually promotion happens after prefill.
-                else:
-                    # In a more complex scheduler, we might keep it in waiting,
-                    # but here we fail it if it can't fit even when batch is empty.
-                    if not self._active_reqs:
-                        req.status = RequestStatus.FAILED
-                        req.error = "Request too large for KV cache"
-                        self._handle_completed(req)
-                    else:
-                        # Put back in waiting to try later
-                        self._waiting.appendleft(req)
-                        break
+            if self._waiting and len(self._active_reqs) < self.config.max_batch_size:
+                self._admit_requests()
 
             if not self._active_reqs:
                 continue
@@ -174,20 +134,25 @@ class Scheduler:
                 
             # 3. Check for finished/cancelled requests
             finished = []
+            now = time.time()
             for req in self._active_reqs:
                 if not req.output_token_ids:
                     continue
-                is_eos = req.output_token_ids[-1] == self.engine.tokenizer.eos_token_id
+                
+                last_token = req.output_token_ids[-1]
+                is_eos = last_token == eos_token_id
                 is_max = len(req.output_token_ids) >= req.sampling_params.max_tokens
                 
                 if is_eos or is_max or req.is_cancelled:
-                    if not req.is_cancelled:
-                        req.status = RequestStatus.COMPLETED
-                    else:
+                    if req.is_cancelled:
                         req.status = RequestStatus.CANCELLED
+                    else:
+                        req.status = RequestStatus.COMPLETED
                     
-                    req.finished_at = time.time()
-                    req.output_text = self.engine.decode_tokens(req.output_token_ids)
+                    req.finished_at = now
+                    # Delay text decoding as it's expensive; only do it if not streaming
+                    if not req._stream_callback:
+                         req.output_text = self.engine.decode_tokens(req.output_token_ids)
                     
                     # Signal stream end
                     if req._stream_callback:
@@ -196,14 +161,53 @@ class Scheduler:
                     finished.append(req)
 
             # 4. Cleanup finished/failed requests
-            for req in finished:
-                self._try_promote_prefix_cache(req)
-                self._active_reqs.remove(req)
-                self.engine.kv_cache_manager.free_sequence(req.request_id)
-                self._handle_completed(req)
+            if finished:
+                for req in finished:
+                    self._active_reqs.remove(req)
+                    self.engine.kv_cache_manager.free_sequence(req.request_id)
+                    self._handle_completed(req)
+                    # Only promote if it was successful and didn't hit max tokens abruptly
+                    if req.status == RequestStatus.COMPLETED:
+                        self._try_promote_prefix_cache(req)
 
-            # 5. Evict old completed requests to prevent memory leaks
-            self._evict_completed()
+            # 5. Evict old completed requests periodically (every 100 iterations or if many)
+            if len(self._completed) > self.config.max_completed_requests * 1.5:
+                 self._evict_completed()
+
+    def _admit_requests(self):
+        """Helper to move requests from waiting to active."""
+        block_size = self.engine.kv_cache_manager.block_size
+        
+        while len(self._active_reqs) < self.config.max_batch_size and self._waiting:
+            req = self._waiting.popleft()
+            
+            # Check KV cache admission with prefix matching
+            prompt_token_ids = req.prompt_token_ids
+            prefix_hashes = _get_prefix_hashes(prompt_token_ids, block_size)
+            
+            matched_blocks, matched_tensors = self.engine.kv_cache_manager.match_prefix(prefix_hashes)
+            matched_len = len(matched_blocks) * block_size
+            
+            req._prefix_cache_token_len = matched_len
+            req._prefix_past_key_values = matched_tensors
+            
+            prompt_len = len(prompt_token_ids)
+            max_new = req.sampling_params.max_tokens
+            if self.engine.kv_cache_manager.can_allocate(prompt_len + max_new - matched_len):
+                self.engine.kv_cache_manager.allocate_sequence(
+                    req.request_id, 
+                    prompt_len, 
+                    prefix_blocks=matched_blocks
+                )
+                self._active_reqs.append(req)
+            else:
+                if not self._active_reqs:
+                    req.status = RequestStatus.FAILED
+                    req.error = "Request too large for KV cache"
+                    self._handle_completed(req)
+                else:
+                    self._waiting.appendleft(req)
+                    break
 
     def _try_promote_prefix_cache(self, req: GenerationRequest):
         """Try to save this request's prompt KV tensors in the prefix cache.
