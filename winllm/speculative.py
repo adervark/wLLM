@@ -109,21 +109,25 @@ class SpeculativeEngine:
         draft_tokens: list[int], target_logits: torch.Tensor
     ) -> bool:
         """Compare draft vs. target predictions, accept matches, reject at first mismatch."""
+        num_verified = 0
         for i in range(len(draft_tokens)):
             # Sample what the target model would have chosen at position i
             target_token_id = sample_token(
                 target_logits[i:i+1, :], request.sampling_params, request.output_token_ids
             )
             target_token = target_token_id.item()
+            num_verified += 1
 
             if target_token == draft_tokens[i]:
                 # Draft model guessed correctly -- accept this token
                 request.output_token_ids.append(target_token)
                 if target_token == self.tokenizer.eos_token_id:
+                    self._trim_target_kv(request, num_verified)
                     return False
             else:
                 # Mismatch: use the target model's correction instead
                 request.output_token_ids.append(target_token)
+                self._trim_target_kv(request, num_verified)
                 break
         else:
             # All draft tokens accepted -- bonus: sample one more from target
@@ -132,6 +136,7 @@ class SpeculativeEngine:
             )
             last_target_token = last_target_token_id.item()
             request.output_token_ids.append(last_target_token)
+            num_verified += 1
             if last_target_token == self.tokenizer.eos_token_id:
                 return False
 
@@ -139,3 +144,17 @@ class SpeculativeEngine:
         request._draft_past_key_values = None
 
         return True
+
+    def _trim_target_kv(self, request: GenerationRequest, tokens_used: int):
+        """Trim target model KV cache to remove positions from rejected draft tokens.
+
+        After verification, the KV cache may contain entries for draft tokens
+        that were not accepted. This trims it to match the actual sequence length.
+        """
+        if request._past_key_values is None:
+            return
+        actual_len = len(request.prompt_token_ids) + len(request.output_token_ids)
+        trimmed = []
+        for k, v in request._past_key_values:
+            trimmed.append((k[:, :, :actual_len, :], v[:, :, :actual_len, :]))
+        request._past_key_values = tuple(trimmed)

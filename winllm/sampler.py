@@ -92,12 +92,13 @@ def apply_top_p(logits: torch.Tensor, top_p: float | list[float]) -> torch.Tenso
         return logits
         
     sorted_logits, sorted_indices = torch.sort(logits, descending=True, dim=-1)
-    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+    probs_sorted = F.softmax(sorted_logits, dim=-1)
+    cumulative_probs = torch.cumsum(probs_sorted, dim=-1)
     
     # Shift cumulative probabilities to the right to keep the first token that exceeds top_p
     # The mask checks if cumulative probability BEFORE the token exceeds top_p
     # So we compute cumulative_probs - current_prob
-    shifted_probs = cumulative_probs - F.softmax(sorted_logits, dim=-1)
+    shifted_probs = cumulative_probs - probs_sorted
     sorted_mask = shifted_probs >= p_tensor
     
     sorted_logits.masked_fill_(sorted_mask, float('-inf'))

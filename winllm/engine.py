@@ -22,7 +22,6 @@ import time
 from typing import AsyncIterator, Optional, Callable
 
 import torch
-import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from .config import ModelConfig, SamplingParams, KVCacheConfig
@@ -168,7 +167,7 @@ class InferenceEngine:
 
         # Fast forward cursor if prefix cache hit
         if req._prefill_cursor == 0 and req._prefix_past_key_values is not None:
-            req._prefill_cursor = req._prefix_len
+            req._prefill_cursor = req._prefix_cache_token_len
             req._past_key_values = req._prefix_past_key_values
 
         start_idx = req._prefill_cursor
@@ -345,13 +344,16 @@ class InferenceEngine:
         if not request._stream_callback:
             return
 
-        full_ids = request.prompt_token_ids + request.output_token_ids
-        current_text = self.tokenizer.decode(full_ids, skip_special_tokens=True)
-
-        if len(current_text) > request._stream_text_cursor:
-            new_text = current_text[request._stream_text_cursor:]
+        # Decode only the latest token to avoid O(n²) full-sequence re-decode.
+        # Note: single-token decoding may differ slightly from full-sequence
+        # decoding for tokenizers with context-dependent spacing (e.g.
+        # SentencePiece), but this is acceptable for streaming — the final
+        # output_text is always decoded from the full sequence.
+        new_text = self.tokenizer.decode(
+            request.output_token_ids[-1:], skip_special_tokens=True
+        )
+        if new_text:
             request._stream_callback(new_text, False)
-            request._stream_text_cursor = len(current_text)
 
     # ------------------------------------------------------------------
     # Full single-request generation (blocking)
@@ -510,6 +512,9 @@ class InferenceEngine:
 
         Returns the last generated token and the final past_key_values.
         """
+        # Maintain running output text to avoid O(n²) re-decoding for stop-string checks
+        running_text = ""
+
         for step in range(1, max_new_tokens):
             # Check if we hit an end-of-sequence token
             if next_token in stop_token_ids:
@@ -520,17 +525,19 @@ class InferenceEngine:
                 request.status = RequestStatus.CANCELLED
                 break
 
-            # Check if any stop string appears in the generated text
-            current_text = self.tokenizer.decode(
-                request.output_token_ids, skip_special_tokens=True
-            )
-            if any(s in current_text for s in stop_strings):
-                for s in stop_strings:
-                    idx = current_text.find(s)
-                    if idx != -1:
-                        request.output_text = current_text[:idx]
-                        break
-                break
+            # Incrementally extend running text for stop-string checking
+            if stop_strings:
+                new_piece = self.tokenizer.decode(
+                    [next_token], skip_special_tokens=True
+                )
+                running_text += new_piece
+                if any(s in running_text for s in stop_strings):
+                    for s in stop_strings:
+                        idx = running_text.find(s)
+                        if idx != -1:
+                            request.output_text = running_text[:idx]
+                            break
+                    break
 
             # Forward pass: feed the last token, reuse KV cache
             token_input = torch.tensor([[next_token]], dtype=torch.long, device=device)

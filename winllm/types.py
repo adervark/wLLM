@@ -63,6 +63,11 @@ class GenerationRequest:
     _loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
 
     @property
+    def _prefix_len(self) -> int:
+        """Alias for _prefix_cache_token_len (backward compatibility)."""
+        return self._prefix_cache_token_len
+
+    @property
     def is_prefill_complete(self) -> bool:
         """Returns True if the entire prompt has been processed by prefill."""
         return self._prefill_cursor >= len(self.prompt_token_ids)

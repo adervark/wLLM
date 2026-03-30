@@ -314,7 +314,6 @@ def create_app(
 
         # Start generation via scheduler to ensure batching/admission control
         gen_task = loop.create_task(scheduler.submit_streaming(gen_request))
-        last_text_len = 0
 
         try:
             while True:
@@ -355,14 +354,12 @@ def create_app(
                     yield {"data": "[DONE]"}
                     break
                 else:
-                    # Decode tokens in this async thread
-                    full_text = await loop.run_in_executor(
-                        None, engine.decode_tokens, gen_request.prompt_token_ids + gen_request.output_token_ids
+                    # Decode only the new token — avoids O(n²) full-sequence re-decode
+                    new_token_ids = gen_request.output_token_ids[-1:]
+                    new_text = await loop.run_in_executor(
+                        None, engine.decode_tokens, new_token_ids
                     )
-                    if len(full_text) > last_text_len:
-                        new_text = full_text[last_text_len:]
-                        last_text_len = len(full_text)
-                        
+                    if new_text:
                         choice = {"index": 0, "finish_reason": None}
                         if is_chat:
                             choice["delta"] = {"content": new_text}

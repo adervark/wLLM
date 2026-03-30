@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 import threading
@@ -15,12 +16,19 @@ from .engine import InferenceEngine
 from .types import GenerationRequest, RequestStatus
 
 def _get_prefix_hashes(tokens: list[int], block_size: int) -> list[int]:
-    """Generate hashes for every complete block prefix."""
+    """Generate cumulative hashes for every complete block prefix.
+
+    Uses incremental SHA-256 so each block adds O(block_size) work
+    instead of the previous O(n²) approach of hashing ever-growing tuples.
+    """
     hashes = []
+    h = hashlib.sha256()
     num_blocks = len(tokens) // block_size
-    for i in range(1, num_blocks + 1):
-        # Hash the prefix up to the end of block i
-        hashes.append(hash(tuple(tokens[:i * block_size])))
+    for i in range(num_blocks):
+        start = i * block_size
+        block_bytes = bytes(tokens[start:start + block_size])
+        h.update(block_bytes)
+        hashes.append(int.from_bytes(h.digest()[:8], 'little'))
     return hashes
 
 logger = logging.getLogger(__name__)
@@ -102,9 +110,17 @@ class Scheduler:
         self._loop_thread = threading.Thread(target=self._run_inference_loop, daemon=True)
         self._loop_thread.start()
 
-        # Cache EOS token to avoid repeated lookups in the loop
+    def _run_inference_loop(self):
+        """Background inference loop — runs on a dedicated daemon thread.
+
+        Continuously:
+          1. Admits waiting requests into the active batch.
+          2. Runs one forward-pass step via the engine.
+          3. Checks for finished / cancelled requests and cleans up.
+        """
+        # Cache EOS token once to avoid repeated lookups in the hot loop
         eos_token_id = self.engine.tokenizer.eos_token_id
-        
+
         while not self._stop_event.is_set():
             # Wait for requests if none are running
             if not self._active_reqs:
@@ -121,7 +137,7 @@ class Scheduler:
             # 2. Run one inference step
             try:
                 self.engine.generate_step(
-                    self._active_reqs, 
+                    self._active_reqs,
                     chunked_prefill_enabled=self.config.chunked_prefill_enabled,
                     max_num_batched_tokens=self.config.max_num_batched_tokens
                 )
@@ -133,33 +149,33 @@ class Scheduler:
                     req.error = str(e)
                     if req._completed_event and req._loop:
                         req._loop.call_soon_threadsafe(req._completed_event.set)
-                
+
             # 3. Check for finished/cancelled requests
             finished = []
             now = time.time()
             for req in self._active_reqs:
                 if not req.output_token_ids:
                     continue
-                
+
                 last_token = req.output_token_ids[-1]
                 is_eos = last_token == eos_token_id
                 is_max = len(req.output_token_ids) >= req.sampling_params.max_tokens
-                
+
                 if is_eos or is_max or req.is_cancelled:
                     if req.is_cancelled:
                         req.status = RequestStatus.CANCELLED
                     else:
                         req.status = RequestStatus.COMPLETED
-                    
+
                     req.finished_at = now
-                    
+
                     # Signal stream end
                     if req._stream_callback:
                         req._stream_callback("", True)
 
                     if req._completed_event and req._loop:
                         req._loop.call_soon_threadsafe(req._completed_event.set)
-                        
+
                     finished.append(req)
 
             # 4. Cleanup finished/failed requests
@@ -174,7 +190,7 @@ class Scheduler:
 
             # 5. Evict old completed requests periodically (every 100 iterations or if many)
             if len(self._completed) > self.config.max_completed_requests * 1.5:
-                 self._evict_completed()
+                self._evict_completed()
 
     def _admit_requests(self):
         """Helper to move requests from waiting to active."""

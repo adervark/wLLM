@@ -35,10 +35,11 @@ class SequenceBlocks:
     """Tracks all blocks allocated for a single sequence."""
     seq_id: str
     blocks: list[KVBlock] = field(default_factory=list)
+    _total_tokens: int = 0  # Cached counter — updated on allocate/extend
 
     @property
     def total_tokens(self) -> int:
-        return sum(b.num_tokens for b in self.blocks)
+        return self._total_tokens
 
     @property
     def num_blocks(self) -> int:
@@ -234,7 +235,7 @@ class KVCacheManager:
             self._allocated_blocks += 1
             remaining -= tokens_in_block
 
-        self._sequences[seq_id] = SequenceBlocks(seq_id=seq_id, blocks=blocks)
+        self._sequences[seq_id] = SequenceBlocks(seq_id=seq_id, blocks=blocks, _total_tokens=num_tokens)
 
         logger.debug(
             "Allocated %d blocks (rewriting %d prefix) for seq %s",
@@ -242,8 +243,7 @@ class KVCacheManager:
         )
         return True
 
-    def _update_allocated_count(self):
-        pass  # O(1) tracking now operates continuously.
+
 
     def match_prefix(self, prefix_hashes: list[int]) -> tuple[list[KVBlock], Optional[tuple]]:
         """Find the longest matching prefix sequence of blocks and its tensors."""
@@ -317,6 +317,9 @@ class KVCacheManager:
                 self._block_pool[block.block_id] = block
                 self._allocated_blocks += 1
                 remaining -= tokens_in_block
+
+        # Update cached total
+        seq_blocks._total_tokens += additional_tokens
 
         return True
 
