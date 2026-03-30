@@ -22,6 +22,7 @@ import time
 from typing import AsyncIterator, Optional, Callable
 
 import torch
+import torch.nn.functional as F
 from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from .config import ModelConfig, SamplingParams, KVCacheConfig
@@ -46,6 +47,7 @@ class InferenceEngine:
 
         self._loader = ModelLoader(model_config)
         self.model: Optional[PreTrainedModel] = None
+        self._device: Optional[torch.device] = None
         self.tokenizer: Optional[PreTrainedTokenizerBase] = None
         self.kv_cache_manager: Optional[KVCacheManager] = None
         self.speculative_engine: Optional['SpeculativeEngine'] = None
@@ -62,6 +64,11 @@ class InferenceEngine:
     def load_model(self):
         """Load model and initialize KV cache manager."""
         self.model, self.tokenizer = self._loader.load()
+        try:
+            self._device = next(self.model.parameters()).device
+        except StopIteration:
+            self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
         self.kv_cache_manager = KVCacheManager(self.kv_cache_config)
 
         # Feed actual model dimensions into KV cache for precise memory estimation
@@ -144,15 +151,8 @@ class InferenceEngine:
         return requests
 
     def _resolve_device(self) -> torch.device:
-        """Figure out which device the model is actually on.
-
-        For multi-GPU / device_map sharded models, self.model.device can be
-        'meta' or inconsistent, so we look at the first parameter instead.
-        """
-        try:
-            return next(self.model.parameters()).device
-        except StopIteration:
-            return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        """Figure out which device the model is actually on."""
+        return self._device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _prefill_single_request(self, req: GenerationRequest, device: torch.device, chunked_prefill: bool, max_tokens: int):
         """Run the prefill forward pass for a single new request.
@@ -256,20 +256,9 @@ class InferenceEngine:
             device=device
         )
         
-        # 2. Handling heterogeneous KV caches in a single pass is tricky with 
-        # standard Transformers. We use the 'attention_mask' to manage different 
-        # prompt lengths. 
-        # First, we need to gather/stack all past_key_values.
-        # Note: This is a memory-intensive operation if we copy. 
-        # In a future pass, we should use a pre-allocated KV pool.
-        
-        # For now, we assume requests in a batch can be stacked if they share
-        # similar structures. 
-        
         # --- Batch the past_key_values ---
-        # This implementation uses the Transformers-native approach of stacking tensors.
-        # This requires sequence-level padding if lengths differ.
-        max_prompt_len = max(len(req.prompt_token_ids) + len(req.output_token_ids) - 1 for req in decode_reqs)
+        seq_lengths = [len(req.prompt_token_ids) + len(req.output_token_ids) - 1 for req in decode_reqs]
+        max_prompt_len = max(seq_lengths)
         
         batched_past_key_values = []
         num_layers = len(decode_reqs[0]._past_key_values)
@@ -277,45 +266,40 @@ class InferenceEngine:
         for layer_idx in range(num_layers):
             keys = []
             vals = []
-            for req in decode_reqs:
+            for i, req in enumerate(decode_reqs):
                 k, v = req._past_key_values[layer_idx]
-                # k, v shape: [1, num_heads, seq_len, head_dim]
-                # Slice or pad to max_prompt_len if needed (simplified here for now)
+                pad_len = max_prompt_len - seq_lengths[i]
+                if pad_len > 0:
+                    k = F.pad(k, (0, 0, pad_len, 0))
+                    v = F.pad(v, (0, 0, pad_len, 0))
                 keys.append(k)
                 vals.append(v)
             
-            # Simple stack if they are already the same length (often true in continuous batching)
-            # If not same length, we'd need more complex padding logic or StaticCache.
-            try:
-                batched_past_key_values.append((
-                    torch.cat(keys, dim=0),
-                    torch.cat(vals, dim=0)
-                ))
-            except RuntimeError:
-                # Fallback to single-request if lengths differ too much to stack easily
-                # This should be replaced with a proper padded KV cache manager
-                for req in decode_reqs:
-                    self._decode_single_request(req, device, batch_size=batch_size)
-                return
+            batched_past_key_values.append((
+                torch.cat(keys, dim=0),
+                torch.cat(vals, dim=0)
+            ))
 
-        # 3. Create attention mask for different history lengths
-        # [batch_size, current_total_len]
-        attention_mask = None # Many models compute this internally from past_key_values lengths
+        # Create attention mask
+        attention_mask = torch.zeros((batch_size, max_prompt_len + 1), dtype=torch.long, device=device)
+        for i, seq_len in enumerate(seq_lengths):
+            attention_mask[i, -(seq_len + 1):] = 1
+            
+        position_ids = attention_mask.sum(dim=1) - 1
+        position_ids = position_ids.unsqueeze(-1)
         
         # 4. Forward pass
         outputs = self.model(
             input_ids,
             past_key_values=batched_past_key_values,
             use_cache=True,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            position_ids=position_ids
         )
         
-        # 5. Distribute outputs back to requests
         new_past_key_values = outputs.past_key_values
-        next_logits = outputs.logits[:, -1, :] # [batch_size, vocab_size]
+        next_logits = outputs.logits[:, -1, :] 
         
-        # 6. Batched sampling
-        # sampler.sample_token needs to support batches with different params
         next_token_ids = sample_token(
             next_logits, 
             [req.sampling_params for req in decode_reqs],
@@ -323,9 +307,12 @@ class InferenceEngine:
         )
         
         for i, req in enumerate(decode_reqs):
-            # Update request state
+            new_seq_len = seq_lengths[i] + 1
             req._past_key_values = tuple(
-                (new_past_key_values[layer_idx][0][i:i+1], new_past_key_values[layer_idx][1][i:i+1])
+                (
+                    new_past_key_values[layer_idx][0][i:i+1, :, -new_seq_len:, :], 
+                    new_past_key_values[layer_idx][1][i:i+1, :, -new_seq_len:, :]
+                )
                 for layer_idx in range(num_layers)
             )
             

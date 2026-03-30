@@ -210,3 +210,51 @@ class TestSamplerEdgeCases:
         result = sample_token(logits, params)
         assert result.item() == 1  # Should pick the highest
 
+
+class TestBatchedSampler:
+    def test_batched_repetition_penalty(self):
+        logits = torch.tensor([
+            [1.0, 2.0, 3.0], 
+            [1.0, 2.0, 3.0]
+        ])
+        generated = [[2], []]
+        penalties = [2.0, 1.0]
+        result = apply_repetition_penalty(logits.clone(), generated, penalties)
+        assert result[0, 2] == 1.5
+        assert result[0, 1] == 2.0
+        assert torch.allclose(result[1], logits[1])
+
+    def test_batched_temperature(self):
+        logits = torch.tensor([
+            [2.0, 4.0, 6.0],
+            [2.0, 4.0, 6.0]
+        ])
+        temps = [2.0, 0.5]
+        result = apply_temperature(logits, temps)
+        assert torch.allclose(result[0], logits[0] / 2.0)
+        assert torch.allclose(result[1], logits[1] / 0.5)
+
+    def test_batched_top_k(self):
+        logits = torch.tensor([
+            [1.0, 5.0, 3.0, 4.0, 2.0],
+            [1.0, 5.0, 3.0, 4.0, 2.0]
+        ])
+        ks = [2, 1]
+        result = apply_top_k(logits, ks)
+        assert result[0, 1] == 5.0 and result[0, 3] == 4.0
+        assert result[0, 0] == float('-inf')
+        assert result[1, 1] == 5.0
+        assert result[1, 3] == float('-inf')
+
+    def test_batched_mixed_sample_token(self):
+        logits = torch.tensor([
+            [1.0, 10.0, 2.0],
+            [1.0, 2.0, 10.0]
+        ])
+        p1 = SamplingParams(temperature=0)
+        p2 = SamplingParams(temperature=1.0)
+        gen = torch.Generator(device=logits.device).manual_seed(42)
+        result = sample_token(logits, [p1, p2], generator=gen)
+        assert result.shape == (2,)
+        assert result[0].item() == 1
+

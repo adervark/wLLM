@@ -131,6 +131,8 @@ class Scheduler:
                 for req in self._active_reqs:
                     req.status = RequestStatus.FAILED
                     req.error = str(e)
+                    if req._completed_event and req._loop:
+                        req._loop.call_soon_threadsafe(req._completed_event.set)
                 
             # 3. Check for finished/cancelled requests
             finished = []
@@ -150,13 +152,13 @@ class Scheduler:
                         req.status = RequestStatus.COMPLETED
                     
                     req.finished_at = now
-                    # Delay text decoding as it's expensive; only do it if not streaming
-                    if not req._stream_callback:
-                         req.output_text = self.engine.decode_tokens(req.output_token_ids)
                     
                     # Signal stream end
                     if req._stream_callback:
                         req._stream_callback("", True)
+
+                    if req._completed_event and req._loop:
+                        req._loop.call_soon_threadsafe(req._completed_event.set)
                         
                     finished.append(req)
 
@@ -205,6 +207,8 @@ class Scheduler:
                     req.status = RequestStatus.FAILED
                     req.error = "Request too large for KV cache"
                     self._handle_completed(req)
+                    if req._completed_event and req._loop:
+                        req._loop.call_soon_threadsafe(req._completed_event.set)
                 else:
                     self._waiting.appendleft(req)
                     break
@@ -267,13 +271,22 @@ class Scheduler:
 
         self.stats.total_prompt_tokens += len(request.prompt_token_ids)
 
+        request._loop = asyncio.get_running_loop()
+        request._completed_event = asyncio.Event()
+
         # Add to waiting queue
         self._waiting.append(request)
         self._new_request_event.set()
 
         # Wait for completion
-        while request.status in (RequestStatus.PENDING, RequestStatus.RUNNING):
-            await asyncio.sleep(0.05)
+        await request._completed_event.wait()
+
+        # Offload expensive final text decoding from GPU loop
+        if request.status == RequestStatus.COMPLETED and not request._stream_callback and not request.output_text:
+            loop = asyncio.get_running_loop()
+            request.output_text = await loop.run_in_executor(
+                None, self.engine.decode_tokens, request.output_token_ids
+            )
 
         return request
 

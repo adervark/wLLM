@@ -211,6 +211,8 @@ class KVCacheManager:
         # Reuse prefix blocks first
         if prefix_blocks:
             for b in prefix_blocks:
+                if b.ref_count == 0:
+                    self._allocated_blocks += 1
                 b.ref_count += 1
                 blocks.append(b)
                 if b.block_id not in self._block_pool:
@@ -229,12 +231,10 @@ class KVCacheManager:
             self._next_block_id += 1
             blocks.append(block)
             self._block_pool[block.block_id] = block
+            self._allocated_blocks += 1
             remaining -= tokens_in_block
 
         self._sequences[seq_id] = SequenceBlocks(seq_id=seq_id, blocks=blocks)
-        # Note: allocated blocks now counts blocks with ref_count > 0 in a real pool sense
-        # For this logic, we keep it simple
-        self._update_allocated_count()
 
         logger.debug(
             "Allocated %d blocks (rewriting %d prefix) for seq %s",
@@ -243,7 +243,7 @@ class KVCacheManager:
         return True
 
     def _update_allocated_count(self):
-        self._allocated_blocks = sum(1 for b in self._block_pool.values() if b.ref_count > 0)
+        pass  # O(1) tracking now operates continuously.
 
     def match_prefix(self, prefix_hashes: list[int]) -> tuple[list[KVBlock], Optional[tuple]]:
         """Find the longest matching prefix sequence of blocks and its tensors."""
@@ -270,6 +270,8 @@ class KVCacheManager:
         # Only promote if we don't have it yet
         if prefix_hash not in self._prefix_cache_blocks:
             for b in blocks:
+                if b.ref_count == 0:
+                    self._allocated_blocks += 1
                 b.ref_count += 1
             self._prefix_cache_blocks[prefix_hash] = blocks
             
@@ -313,9 +315,8 @@ class KVCacheManager:
                 self._next_block_id += 1
                 seq_blocks.blocks.append(block)
                 self._block_pool[block.block_id] = block
+                self._allocated_blocks += 1
                 remaining -= tokens_in_block
-
-            self._update_allocated_count()
 
         return True
 
@@ -327,10 +328,9 @@ class KVCacheManager:
         for b in seq_blocks.blocks:
             b.ref_count -= 1
             if b.ref_count == 0:
+                self._allocated_blocks -= 1
                 if b.block_id in self._block_pool:
                     del self._block_pool[b.block_id]
-        
-        self._update_allocated_count()
 
         logger.debug(
             "Released sequence %s, utilization now %.1f%%",

@@ -356,7 +356,9 @@ def create_app(
                     break
                 else:
                     # Decode tokens in this async thread
-                    full_text = engine.decode_tokens(gen_request.prompt_token_ids + gen_request.output_token_ids)
+                    full_text = await loop.run_in_executor(
+                        None, engine.decode_tokens, gen_request.prompt_token_ids + gen_request.output_token_ids
+                    )
                     if len(full_text) > last_text_len:
                         new_text = full_text[last_text_len:]
                         last_text_len = len(full_text)

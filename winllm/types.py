@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 import uuid
@@ -56,6 +57,10 @@ class GenerationRequest:
     _prefix_past_key_values: Optional[tuple] = field(default=None, repr=False)
     _prefill_cursor: int = field(default=0, repr=False)
     _draft_past_key_values: Optional[tuple] = field(default=None, repr=False)
+
+    # Polling optimization
+    _completed_event: Optional[asyncio.Event] = field(default=None, repr=False)
+    _loop: Optional[asyncio.AbstractEventLoop] = field(default=None, repr=False)
 
     @property
     def is_prefill_complete(self) -> bool:
