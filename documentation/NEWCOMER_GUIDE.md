@@ -8,7 +8,7 @@ This guide will teach you exactly how the system is structured, the mathematical
 
 ---
 
-## 🏗️ 1. Theoretical Concepts You Must Know
+## 1. Theoretical Concepts You Must Know
 
 Before looking at the PyTorch files, you need to understand the three primary architectural concepts that make wLLM incredibly fast:
 
@@ -26,24 +26,24 @@ Because users finish speaking at different times, wLLM uses **Continuous Batchin
 
 ---
 
-## 🗺️ 2. Comprehensive Directory Structure
+## 2. Comprehensive Directory Structure
 
 Here is a microscopic breakdown of every single file in the repository and its specific responsibility in the ecosystem.
 
-### 🌐 The Interfaces (Connecting to the Outside World)
+### The Interfaces (Connecting to the Outside World)
 These files never do math. They just handle raw text and networking.
 - `winllm/cli.py` & `winllm/commands/` - The CLI entry point. Parses arguments like `--model` or `--quantization` and launches the appropriate sub-system (`chat`, `serve`, `benchmark`).
 - `winllm/api_server.py` - A highly concurrent `FastAPI` web server. It maps OpenAI routes like `/v1/chat/completions` into internal `GenerationRequest` Python objects. It uses asynchronous Server-Sent Events (SSE) to stream words back to the client natively.
 - `winllm/utils.py` - Helpers for formatting conversational "Chat Templates" (converting JSON messages like `[{"role": "user", "content": "hi"}]` into the exact string formatting expected by Llama or Mistral).
 
-### 🧠 The Core Engine (The Hot Loops)
+### The Core Engine (The Hot Loops)
 This is where the actual token generation occurs.
 - `winllm/engine.py` - **The Heart.** The `InferenceEngine` class lives here. It takes a Batch of users, pre-allocates contiguous block memory tensors on the GPU (`torch.zeros()`), pushes the batch through the HuggingFace model `forward()` pass, grabs the `logits`, hits the sampler, limits the context lengths, streams the token callbacks, and manages the lifecycle tracking arrays.
 - `winllm/scheduler.py` - **The Traffic Cop.** Contains an infinite `asyncio` background loop. It maintains a `self._waiting` deque and a `self._active_reqs` list. Every few milliseconds, it asks the KV Manager how much memory is left. If space allows, it promotes waiting users to active, builds an execution Batch list, and hands it directly to the engine.
 - `winllm/sampler.py` - **The Mathematician.** The `sample_token()` pipeline completely avoids GPU memory fragmentation by utilizing strictly in-place PyTorch modifications (`logits.div_()`, `.scatter_()`). It calculates Repetition Penalties, Temperature variants, and Nucleus extraction formats to guarantee human-like text outputs.
 - `winllm/types.py` - **The Data Schemas.** Contains the `GenerationRequest` data-class. This object acts as the passport for a request, holding its prompt, active token sequence, stop parameters, and tracking metrics.
 
-### 💾 Memory & Hardware Management
+### Memory & Hardware Management
 These files ensure your graphics card doesn't explode.
 - `winllm/kv_cache.py` - **The RAM Manager.** A Paged-Attention style tracking pool. At startup, it divides all of your available GPU VRAM into hundreds of small "Blocks". When a user is talking, it leases blocks to the user. When the user disconnects, it immediately releases the blocks back into the central pool via O(1) integer tracking counters.
 - `winllm/device.py` - Queries your Windows hardware capabilities via `torch.cuda`. It automatically calculates mathematically optimal defaults for batch sizing, VRAM fractions, tensor-parallel sizes, and attention backends (like SDPA or FlashAttention 2) so the user never has to configure them manually.
@@ -51,7 +51,7 @@ These files ensure your graphics card doesn't explode.
 
 ---
 
-## 🕵️‍♂️ 3. Code Tracing: The Lifecycle of an API Request
+## 3. Code Tracing: The Lifecycle of an API Request
 
 To truly understand how to edit the codebase, follow this trace of how a JSON payload transforms into a streamed AI response:
 
@@ -69,7 +69,7 @@ To truly understand how to edit the codebase, follow this trace of how a JSON pa
 
 ---
 
-## 🛠️ 4. How to Safely Add Major Features
+## 4. How to Safely Add Major Features
 
 You can maintain and scale this repository entirely in standard Object-Oriented Python.
 
@@ -94,7 +94,7 @@ If your feature adds completely new logic (e.g., a "Ban Word" array algorithm in
 
 ---
 
-## 🚀 5. Quick Wins to Practice On
+## 5. Quick Wins to Practice On
 
 If you are looking to get your hands dirty quickly, try tracking down and modifying these specific behaviors to build your confidence:
 
