@@ -40,6 +40,8 @@ def build_model_config(args) -> ModelConfig:
     kwargs["device"] = args.device
     if hasattr(args, "backend"):
         kwargs["inference_backend"] = args.backend
+    if hasattr(args, "force_architecture") and args.force_architecture:
+        kwargs["force_architecture"] = args.force_architecture
 
     return ModelConfig(**kwargs)
 

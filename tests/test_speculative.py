@@ -25,7 +25,7 @@ def _make_mock_model(eos_token_id=2, vocab_size=100, default_token=5):
         logits = torch.full((batch, seq_len, vocab_size), -10.0)
         logits[:, :, default_token] = 10.0
         output.logits = logits
-        output.past_key_values = ((torch.zeros(1),),)
+        output.past_key_values = ((torch.zeros(batch, 1, seq_len, 4), torch.zeros(batch, 1, seq_len, 4)),)
         return output
 
     model.side_effect = forward_fn
@@ -57,8 +57,10 @@ def setup():
         output_token_ids=[10],
         sampling_params=SamplingParams(temperature=0, max_tokens=100),
     )
-    # Initialize past KV caches
-    request._past_key_values = ((torch.zeros(1),),)
+    # Initialize past KV caches with proper (key, value) structure per layer
+    # Shape: ((batch, num_heads, seq_len, head_dim), ...)
+    seq_len = len(request.prompt_token_ids) + len(request.output_token_ids)
+    request._past_key_values = ((torch.zeros(1, 1, seq_len, 4), torch.zeros(1, 1, seq_len, 4)),)
     request._draft_past_key_values = None
 
     return engine, request
@@ -82,7 +84,7 @@ class TestDraftProposals:
         logits = torch.full((1, 1, 100), -10.0)
         logits[:, :, engine.tokenizer.eos_token_id] = 10.0
         eos_output.logits = logits
-        eos_output.past_key_values = ((torch.zeros(1),),)
+        eos_output.past_key_values = ((torch.zeros(1, 1, 1, 4), torch.zeros(1, 1, 1, 4)),)
         engine.draft_model.return_value = eos_output
 
         tokens = engine._draft_proposals(request)
@@ -166,7 +168,7 @@ class TestAcceptOrReject:
 
     def test_resets_draft_kv_cache(self, setup):
         engine, request = setup
-        request._draft_past_key_values = ((torch.zeros(1),),)
+        request._draft_past_key_values = ((torch.zeros(1, 1, 4, 4), torch.zeros(1, 1, 4, 4)),)
 
         logits = torch.full((4, 100), -10.0)
         logits[:, 7] = 10.0  # Mismatch

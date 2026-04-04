@@ -216,10 +216,11 @@ class InferenceEngine:
         # then verify them with the target model in one pass.
         # Only works for single-request batches (no batched speculation yet).
         if self.speculative_engine and batch_size == 1:
+            tokens_before = len(req.output_token_ids)
             self.speculative_engine.step(req)
-            self.kv_cache_manager.extend_sequence(
-                req.request_id, len(req.output_token_ids) - req.generation_tokens
-            )
+            tokens_added = len(req.output_token_ids) - tokens_before
+            if tokens_added > 0:
+                self.kv_cache_manager.extend_sequence(req.request_id, tokens_added)
             self._emit_stream_token(req)
             return
 
@@ -247,6 +248,11 @@ class InferenceEngine:
         This is the primary throughput optimization, moving from O(N) model passes
         to O(1) for a batch of size N.
         """
+        # Filter out cancelled requests before wasting a forward pass on them
+        decode_reqs = [r for r in decode_reqs if not r.is_cancelled]
+        if not decode_reqs:
+            return
+
         batch_size = len(decode_reqs)
         
         # 1. Prepare batched inputs
@@ -257,7 +263,7 @@ class InferenceEngine:
         
         # --- Batch the past_key_values ---
         seq_lengths = [len(req.prompt_token_ids) + len(req.output_token_ids) - 1 for req in decode_reqs]
-        max_prompt_len = max(seq_lengths)
+        max_seq_len = max(seq_lengths)
         
         batched_past_key_values = []
         num_layers = len(decode_reqs[0]._past_key_values)
@@ -270,8 +276,8 @@ class InferenceEngine:
         
         for layer_idx in range(num_layers):
             # Pre-allocate batched continuous tensors (bypasses thousands of internal F.pad memory allocations)
-            batched_k = torch.zeros((batch_size, num_kv_heads, max_prompt_len, head_dim), dtype=kv_dtype, device=device)
-            batched_v = torch.zeros((batch_size, num_kv_heads, max_prompt_len, head_dim), dtype=kv_dtype, device=device)
+            batched_k = torch.zeros((batch_size, num_kv_heads, max_seq_len, head_dim), dtype=kv_dtype, device=device)
+            batched_v = torch.zeros((batch_size, num_kv_heads, max_seq_len, head_dim), dtype=kv_dtype, device=device)
             
             for i, req in enumerate(decode_reqs):
                 k, v = req._past_key_values[layer_idx]
@@ -282,7 +288,7 @@ class InferenceEngine:
             batched_past_key_values.append((batched_k, batched_v))
 
         # Create attention mask
-        attention_mask = torch.zeros((batch_size, max_prompt_len + 1), dtype=torch.long, device=device)
+        attention_mask = torch.zeros((batch_size, max_seq_len + 1), dtype=torch.long, device=device)
         for i, seq_len in enumerate(seq_lengths):
             attention_mask[i, -(seq_len + 1):] = 1
             

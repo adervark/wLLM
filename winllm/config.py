@@ -40,6 +40,7 @@ class ModelConfig:
     device_map_strategy: str = "auto"       # "auto", "balanced", "balanced_low_0", "sequential"
     cpu_offload: bool = False               # Offload layers to CPU if they don't fit in VRAM
     attention_backend: str = "auto"         # "auto", "sdpa", "flash_attention_2", "eager"
+    force_architecture: Optional[str] = None # Manual override for unknown model types
 
     @property
     def torch_dtype(self):

@@ -209,3 +209,98 @@ class TestKVCacheManager:
         mgr.max_total_blocks = 0
         assert mgr.utilization == 0.0
 
+
+# --- extend_sequence ---
+
+
+class TestExtendSequence:
+    @pytest.fixture
+    def manager(self):
+        config = KVCacheConfig(block_size=16, gpu_memory_fraction=0.4)
+        mgr = KVCacheManager(config)
+        mgr.max_total_blocks = 100
+        return mgr
+
+    def test_extend_fills_last_block_first(self, manager):
+        """Extension should fill the last block's free slots before allocating new blocks."""
+        manager.allocate_sequence("s1", 10)  # 1 block with 10/16 tokens
+        initial_blocks = manager._allocated_blocks
+        manager.extend_sequence("s1", 3)  # 10+3=13, still fits in 1 block
+        assert manager._allocated_blocks == initial_blocks  # No new blocks
+        seq = manager._sequences["s1"]
+        assert seq.total_tokens == 13
+        assert seq.num_blocks == 1
+
+    def test_extend_creates_new_block(self, manager):
+        """Extension that overflows the last block should create new blocks."""
+        manager.allocate_sequence("s1", 15)  # 1 block, 15/16 slots used
+        initial_blocks = manager._allocated_blocks
+        manager.extend_sequence("s1", 5)  # 15+5=20, needs 2 blocks
+        assert manager._allocated_blocks == initial_blocks + 1
+        seq = manager._sequences["s1"]
+        assert seq.total_tokens == 20
+
+    def test_extend_unknown_sequence_allocates(self, manager):
+        """Extending a non-existent sequence should allocate it fresh."""
+        result = manager.extend_sequence("new", 10)
+        assert result is True
+        assert "new" in manager._sequences
+
+    def test_extend_when_out_of_blocks_fails(self, manager):
+        """Extension that requires more blocks than available should fail."""
+        manager.max_total_blocks = 2
+        manager.allocate_sequence("s1", 32)  # Uses 2 blocks
+        result = manager.extend_sequence("s1", 32)  # Needs 2 more blocks
+        assert result is False
+
+    def test_multiple_extends(self, manager):
+        """Multiple sequential extensions should work correctly."""
+        manager.allocate_sequence("s1", 5)
+        for _ in range(10):
+            manager.extend_sequence("s1", 1)
+        seq = manager._sequences["s1"]
+        assert seq.total_tokens == 15
+
+
+# --- Prefix cache operations ---
+
+
+class TestPrefixCache:
+    @pytest.fixture
+    def manager(self):
+        config = KVCacheConfig(block_size=16, gpu_memory_fraction=0.4)
+        mgr = KVCacheManager(config)
+        mgr.max_total_blocks = 100
+        return mgr
+
+    def test_match_prefix_no_match(self, manager):
+        blocks, tensors = manager.match_prefix([12345])
+        assert blocks == []
+        assert tensors is None
+
+    def test_promote_and_match(self, manager):
+        """Promoted prefix should be findable via match_prefix."""
+        manager.allocate_sequence("s1", 16)  # 1 full block
+        fake_tensors = (("key_tensor", "val_tensor"),)
+        manager.promote_to_prefix(42, "s1", 16, fake_tensors)
+        blocks, tensors = manager.match_prefix([42])
+        assert len(blocks) > 0
+        assert tensors == fake_tensors
+
+    def test_promote_idempotent(self, manager):
+        """Promoting the same hash twice should not duplicate blocks."""
+        manager.allocate_sequence("s1", 16)
+        fake_tensors = (("k", "v"),)
+        manager.promote_to_prefix(42, "s1", 16, fake_tensors)
+        blocks_before = len(manager._prefix_cache_blocks)
+        manager.promote_to_prefix(42, "s1", 16, fake_tensors)
+        assert len(manager._prefix_cache_blocks) == blocks_before
+
+    def test_reset_clears_prefix_cache(self, manager):
+        """Reset should clear all prefix cache data."""
+        manager.allocate_sequence("s1", 16)
+        manager.promote_to_prefix(42, "s1", 16, (("k", "v"),))
+        manager.reset()
+        assert len(manager._prefix_cache_blocks) == 0
+        assert len(manager._prefix_cache_tensors) == 0
+        assert manager._allocated_blocks == 0

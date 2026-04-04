@@ -224,9 +224,9 @@ class TestEmitStreamToken:
         engine._emit_stream_token(req)  # Should not raise
 
     def test_stream_callback_path(self, engine):
-        """_stream_callback gets decoded text deltas."""
+        """_stream_callback gets decoded text from single-token decode."""
         engine.tokenizer = _make_mock_tokenizer()
-        engine.tokenizer.decode.return_value = "Hello world"
+        engine.tokenizer.decode.return_value = "world"
 
         received = []
 
@@ -238,13 +238,12 @@ class TestEmitStreamToken:
             output_token_ids=[3],
         )
         req._stream_callback = cb
-        req._stream_text_cursor = 5  # "Hello" already sent
 
         engine._emit_stream_token(req)
 
-        # Should have sent " world" (chars 5-11)
+        # Single-token decode sends the full decode result of the last token
         assert len(received) == 1
-        assert received[0][0] == " world"
+        assert received[0][0] == "world"
         assert received[0][1] is False
 
 
@@ -263,3 +262,97 @@ class TestResolveDevice:
         engine.model.parameters.return_value = iter([])  # Empty
         device = engine._resolve_device()
         assert isinstance(device, torch.device)
+
+
+# --- Cancelled request handling ---
+
+
+class TestCancelledRequest:
+    def test_cancelled_request_status(self, engine):
+        req = GenerationRequest(prompt="hello")
+        req.cancel()
+        assert req.is_cancelled is True
+
+    def test_cancel_is_idempotent(self, engine):
+        req = GenerationRequest(prompt="hello")
+        req.cancel()
+        req.cancel()  # Second cancel should not crash
+        assert req.is_cancelled is True
+
+
+# --- Request completion states ---
+
+
+class TestRequestCompletionStates:
+    def test_failed_request_has_error(self, engine):
+        """Generate on unready engine should produce FAILED with an error message."""
+        req = GenerationRequest(prompt="hello")
+        result = engine.generate(req)
+        assert result.status == RequestStatus.FAILED
+        assert result.error is not None
+        assert len(result.error) > 0
+
+    def test_stream_finished_signal(self, engine):
+        """_emit_stream_token with _token_callback should send the last token's ID."""
+        received = []
+
+        def cb(token_id, finished):
+            received.append((token_id, finished))
+
+        req = GenerationRequest(output_token_ids=[42, 99])
+        req._token_callback = cb
+        engine._emit_stream_token(req)
+
+        # Should emit the last token ID
+        assert len(received) == 1
+        assert received[0][0] == 99
+        assert received[0][1] is False
+
+
+# --- Token properties ---
+
+
+class TestRequestProperties:
+    def test_total_tokens(self):
+        from winllm.types import GenerationRequest
+        req = GenerationRequest(
+            prompt_token_ids=[1, 2, 3],
+            output_token_ids=[4, 5],
+        )
+        assert req.total_tokens == 5
+
+    def test_generation_tokens(self):
+        from winllm.types import GenerationRequest
+        req = GenerationRequest(
+            output_token_ids=[4, 5, 6],
+        )
+        assert req.generation_tokens == 3
+
+    def test_tokens_per_second_zero_elapsed(self):
+        from winllm.types import GenerationRequest
+        req = GenerationRequest()
+        assert req.tokens_per_second == 0.0
+
+    def test_tokens_per_second_normal(self):
+        from winllm.types import GenerationRequest
+        req = GenerationRequest(
+            output_token_ids=[1, 2, 3, 4, 5],
+        )
+        req.started_at = time.time() - 1.0
+        req.finished_at = time.time()
+        tps = req.tokens_per_second
+        assert tps > 0
+
+    def test_elapsed_not_started(self):
+        from winllm.types import GenerationRequest
+        req = GenerationRequest()
+        assert req.elapsed == 0.0
+
+    def test_is_prefill_complete(self):
+        from winllm.types import GenerationRequest
+        req = GenerationRequest(prompt_token_ids=[1, 2, 3])
+        req._prefill_cursor = 2
+        assert not req.is_prefill_complete
+        req._prefill_cursor = 3
+        assert req.is_prefill_complete
+

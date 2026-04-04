@@ -4,6 +4,41 @@ All notable changes to WinLLM are documented here.
 
 ---
 
+## [1.0.1] - 2026-04-04
+### Production Bug Fixes & Test Hardening
+
+#### Critical Fixes
+- **Prefix caching completely broken** (`scheduler.py`) -- `_try_promote_prefix_cache` used Python `hash()` while `_admit_requests` used SHA-256 via `_get_prefix_hashes()`. Promoted entries were never found during lookup. Fixed to use `_get_prefix_hashes()` consistently.
+- **`_get_prefix_hashes` crashes on real models** (`scheduler.py`) -- `bytes()` serialization only handles token IDs 0-255, but real vocabularies use IDs up to 150k+. Replaced with `struct.pack()` for proper integer serialization.
+- **Speculative decode KV extend always 0** (`engine.py`) -- `len(output_token_ids) - generation_tokens` is always 0 (they are the same value). Fixed by capturing output length before the speculative step and computing the delta.
+- **`SequenceBlocks.total_tokens` returns 0 on direct construction** (`kv_cache.py`) -- `_total_tokens` cached counter was only set by `KVCacheManager.allocate_sequence`, not by direct `SequenceBlocks(blocks=...)` construction. Added `__post_init__` to compute from blocks.
+
+#### Performance Fixes
+- **`extend_sequence` iterates all blocks** (`kv_cache.py`) -- Only the last block can ever have free slots. Changed to check only the last block.
+- **O(n*m) scheduler cleanup** (`scheduler.py`) -- `list.remove(req)` in a loop. Replaced with set-based filtering via list comprehension.
+- **Sampler corrupts caller's logits** (`sampler.py`) -- `apply_temperature` uses `logits.div_()` in-place, which corrupts the caller's tensor when it shares memory with model outputs. Added `logits.clone()` at pipeline entry in `sample_token`.
+- **`_decode_batch` processes cancelled requests** (`engine.py`) -- Cancelled requests in a batch consumed GPU compute. Added filtering before the forward pass.
+
+#### Cleanup
+- Removed dead `_prefix_len` backward-compat alias from `GenerationRequest` (`types.py`).
+- Renamed misleading `max_prompt_len` to `max_seq_len` in `_decode_batch` (`engine.py`).
+- Removed misleading "no logits.clone needed" comment (`sampler.py`).
+
+#### Test Fixes (8 pre-existing failures resolved)
+- Fixed `test_stream_callback_path` -- tested obsolete cursor-based streaming logic; updated to match current single-token decode behavior.
+- Fixed 3 scheduler hash tests -- asserted `hash()` values but code uses SHA-256; updated to test structural properties.
+- Fixed 3 speculative KV mock tests -- mock KV structure was `((tensor,),)` (1-tuple) but `_trim_target_kv` expects `((key, value),)` (2-tuple).
+- Fixed `test_with_blocks` -- covered by `SequenceBlocks.__post_init__` fix.
+
+#### Test Expansion (231 -> 275 tests, +44)
+- **`test_model_loader.py`** [NEW] (17 tests) -- Quantization config building (NF4, INT8, GPTQ, AWQ, dtype), KV param extraction (Llama, GPT, computed head_dim), device map resolution, lifecycle management.
+- **`test_engine.py`** (+9 tests) -- Cancelled request handling, request completion states, stream finished signals, token properties, prefill completion.
+- **`test_kv_cache.py`** (+12 tests) -- `extend_sequence` (last-block fill, overflow, unknown seq, OOM, multiple), prefix cache (no match, promote/match, idempotent, reset).
+- **`test_scheduler.py`** (+5 tests) -- Prefix hash consistency (same prefix, cumulative, large blocks, high cardinality).
+- **`test_sampler.py`** (+2 tests) -- Logits non-mutation verification, greedy fast-path validation.
+
+---
+
 ## [1.0.0] - 2026-03-30
 ### High-Performance Tensor & Async Overhaul
 

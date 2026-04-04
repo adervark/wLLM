@@ -21,14 +21,18 @@ class TestGetPrefixHashes:
         tokens = list(range(16))
         hashes = _get_prefix_hashes(tokens, block_size=16)
         assert len(hashes) == 1
-        assert hashes[0] == hash(tuple(tokens[:16]))
+        # SHA-256 hash should be a positive integer fitting in 8 bytes
+        assert isinstance(hashes[0], int)
 
     def test_two_blocks(self):
         tokens = list(range(32))
         hashes = _get_prefix_hashes(tokens, block_size=16)
         assert len(hashes) == 2
-        assert hashes[0] == hash(tuple(tokens[:16]))
-        assert hashes[1] == hash(tuple(tokens[:32]))
+        # Each block produces a distinct hash (cumulative SHA-256)
+        assert hashes[0] != hashes[1]
+        # First block hash should match the one-block case
+        one_block = _get_prefix_hashes(tokens[:16], block_size=16)
+        assert hashes[0] == one_block[0]
 
     def test_partial_last_block_ignored(self):
         """Only complete blocks should be hashed."""
@@ -54,9 +58,8 @@ class TestGetPrefixHashes:
         tokens = [10, 20, 30]
         hashes = _get_prefix_hashes(tokens, block_size=1)
         assert len(hashes) == 3
-        assert hashes[0] == hash(tuple([10]))
-        assert hashes[1] == hash(tuple([10, 20]))
-        assert hashes[2] == hash(tuple([10, 20, 30]))
+        # Cumulative: each hash depends on all previous blocks
+        assert len(set(hashes)) == 3  # All distinct
 
 
 # ─── SchedulerStats ────────────────────────────────────────────────────────
@@ -117,3 +120,48 @@ class TestSchedulerStats:
 
         assert s.total_requests == 1
         assert s.avg_tokens_per_second == 10.0
+
+
+# --- Prefix hash consistency ---
+
+
+class TestPrefixHashConsistency:
+    def test_same_prefix_same_hash(self):
+        """Two sequences with the same prompt prefix should get the same hash."""
+        tokens1 = list(range(32))
+        tokens2 = list(range(32)) + [100, 200, 300]  # Same prefix, different suffix
+        h1 = _get_prefix_hashes(tokens1, block_size=16)
+        h2 = _get_prefix_hashes(tokens2, block_size=16)
+        # First two block hashes should be identical
+        assert h1[0] == h2[0]
+        assert h1[1] == h2[1]
+
+    def test_promotion_uses_same_hash_as_lookup(self):
+        """Verify that the hash used for promotion matches the one used for lookup."""
+        tokens = list(range(64))
+        h1 = _get_prefix_hashes(tokens, block_size=16)
+        h2 = _get_prefix_hashes(tokens, block_size=16)
+        assert h1 == h2
+
+    def test_hash_is_cumulative(self):
+        """Each block hash should depend on ALL previous blocks, not just the current one."""
+        tokens = list(range(32))
+        hashes = _get_prefix_hashes(tokens, block_size=16)
+
+        # If we change the first block, the second block hash should also change
+        tokens_modified = [999] + list(range(1, 32))
+        hashes_modified = _get_prefix_hashes(tokens_modified, block_size=16)
+        assert hashes[0] != hashes_modified[0]
+        assert hashes[1] != hashes_modified[1]  # Second hash also changes
+
+    def test_large_block_size(self):
+        tokens = list(range(1024))
+        hashes = _get_prefix_hashes(tokens, block_size=512)
+        assert len(hashes) == 2
+
+    def test_single_token_block_high_cardinality(self):
+        """With block_size=1, each token position gets its own hash."""
+        tokens = list(range(100))
+        hashes = _get_prefix_hashes(tokens, block_size=1)
+        assert len(hashes) == 100
+        assert len(set(hashes)) == 100  # All unique

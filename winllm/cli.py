@@ -34,6 +34,7 @@ def _add_common_model_args(parser):
     parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit", "awq", "gptq"], default="auto")
     parser.add_argument("--max-model-len", type=int, default=None, help="Auto-detected if not specified")
     parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--force-architecture", help="Manually override model architecture type")
     parser.add_argument("--verbose", "-v", action="store_true")
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import struct
 import time
 import threading
 from collections import deque
@@ -19,14 +20,16 @@ def _get_prefix_hashes(tokens: list[int], block_size: int) -> list[int]:
     """Generate cumulative hashes for every complete block prefix.
 
     Uses incremental SHA-256 so each block adds O(block_size) work
-    instead of the previous O(n²) approach of hashing ever-growing tuples.
+    instead of the previous O(n^2) approach of hashing ever-growing tuples.
     """
     hashes = []
     h = hashlib.sha256()
     num_blocks = len(tokens) // block_size
     for i in range(num_blocks):
         start = i * block_size
-        block_bytes = bytes(tokens[start:start + block_size])
+        # Use struct.pack for proper serialization of arbitrary-sized token IDs.
+        # bytes() only works for values 0-255, which is insufficient for real vocabularies.
+        block_bytes = struct.pack(f'<{block_size}i', *tokens[start:start + block_size])
         h.update(block_bytes)
         hashes.append(int.from_bytes(h.digest()[:8], 'little'))
     return hashes
@@ -180,8 +183,9 @@ class Scheduler:
 
             # 4. Cleanup finished/failed requests
             if finished:
+                finished_set = set(id(r) for r in finished)
+                self._active_reqs = [r for r in self._active_reqs if id(r) not in finished_set]
                 for req in finished:
-                    self._active_reqs.remove(req)
                     self.engine.kv_cache_manager.free_sequence(req.request_id)
                     self._handle_completed(req)
                     # Only promote if it was successful and didn't hit max tokens abruptly
@@ -257,7 +261,12 @@ class Scheduler:
                 v[:, :, :block_size, :],
             ))
 
-        first_block_hash = hash(tuple(req.prompt_token_ids[:block_size]))
+        # Use the same SHA-256 hash that _admit_requests uses for lookups,
+        # so promoted entries are actually found during prefix matching.
+        prefix_hashes = _get_prefix_hashes(req.prompt_token_ids, block_size)
+        if not prefix_hashes:
+            return
+        first_block_hash = prefix_hashes[0]
         self.engine.kv_cache_manager.promote_to_prefix(
             first_block_hash, req.request_id, block_size, tuple(first_block_kv)
         )

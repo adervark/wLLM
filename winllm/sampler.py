@@ -41,7 +41,6 @@ def apply_repetition_penalty(
              mask[i].scatter_(0, idx_tensor, True)
              
     # Apply penalty
-    # Apply penalty in-place (no logits.clone needed)
     penalized = torch.where(logits > 0, logits / penalty_tensor, logits * penalty_tensor)
     logits = torch.where(mask, penalized, logits)
     return logits
@@ -128,7 +127,9 @@ def sample_token(
     if all_greedy and all(p == 1.0 for p in penalties):
         return torch.argmax(logits, dim=-1)
     
-    # 1. Pipeline modifications
+    # 1. Pipeline modifications (clone to avoid corrupting the caller's tensor,
+    #    since apply_temperature uses in-place div_)
+    logits = logits.clone()
     logits = apply_repetition_penalty(logits, generated_ids, penalties)
     logits = apply_temperature(logits, temperatures)
     logits = apply_top_k(logits, top_ks)

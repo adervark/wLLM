@@ -35,7 +35,12 @@ class SequenceBlocks:
     """Tracks all blocks allocated for a single sequence."""
     seq_id: str
     blocks: list[KVBlock] = field(default_factory=list)
-    _total_tokens: int = 0  # Cached counter — updated on allocate/extend
+    _total_tokens: int = 0  # Cached counter -- updated on allocate/extend
+
+    def __post_init__(self):
+        # If blocks were provided but _total_tokens wasn't set, compute it
+        if self.blocks and self._total_tokens == 0:
+            self._total_tokens = sum(b.num_tokens for b in self.blocks)
 
     @property
     def total_tokens(self) -> int:
@@ -292,11 +297,11 @@ class KVCacheManager:
         seq_blocks = self._sequences[seq_id]
 
         remaining = additional_tokens
-        for block in seq_blocks.blocks:
-            if remaining <= 0:
-                break
-            fill = min(remaining, block.free_slots)
-            block.num_tokens += fill
+        # Only the last block can have free slots; all previous blocks are full
+        if seq_blocks.blocks:
+            last_block = seq_blocks.blocks[-1]
+            fill = min(remaining, last_block.free_slots)
+            last_block.num_tokens += fill
             remaining -= fill
 
         if remaining > 0:

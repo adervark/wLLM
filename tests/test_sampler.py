@@ -260,3 +260,22 @@ class TestBatchedSampler:
         assert result.shape == (2,)
         assert result[0].item() == 1
 
+
+# --- Logits safety ---
+
+
+class TestLogitsSafety:
+    def test_sample_token_does_not_mutate_input(self):
+        """sample_token should clone logits internally to avoid corrupting the caller's tensor."""
+        logits = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]])
+        original = logits.clone()
+        params = SamplingParams(temperature=2.0, top_k=3, repetition_penalty=1.5)
+        sample_token(logits, params, generated_ids=[0, 1])
+        assert torch.allclose(logits, original), "sample_token mutated the input logits"
+
+    def test_greedy_path_does_not_clone(self):
+        """Pure greedy (all temps 0, no penalties) should take the fast path without cloning."""
+        logits = torch.tensor([[1.0, 5.0, 3.0]])
+        params = SamplingParams(temperature=0, repetition_penalty=1.0)
+        result = sample_token(logits, params)
+        assert result.item() == 1  # Index of max value (5.0)
