@@ -36,8 +36,8 @@ def apply_repetition_penalty(
     mask = torch.zeros((batch_size, vocab_size), dtype=torch.bool, device=device)
     for i, ids in enumerate(gen_ids_list):
         if ids and penalties[i] != 1.0:
-             # Convert list to tensor for indexing
-             idx_tensor = torch.tensor(list(set(ids)), dtype=torch.long, device=device)
+             # Convert list to unique tensor for indexing
+             idx_tensor = torch.as_tensor(ids, dtype=torch.long, device=device).unique()
              mask[i].scatter_(0, idx_tensor, True)
              
     # Apply penalty

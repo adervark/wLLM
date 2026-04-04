@@ -80,6 +80,7 @@ class KVCacheManager:
         # block_id -> KVBlock (for global ref management)
         self._block_pool: dict[int, KVBlock] = {}
 
+        self._per_token_kv_bytes = self._estimate_per_token_kv_bytes()
         self.max_total_blocks = self._estimate_max_blocks()
         self._allocated_blocks: int = 0 # This will be updated by _update_allocated_count
 
@@ -144,8 +145,7 @@ class KVCacheManager:
             return self.config.max_blocks_per_seq * 4  # Fallback for CPU
 
         available = self._get_total_available_vram() * self.config.gpu_memory_fraction
-        per_token_bytes = self._estimate_per_token_kv_bytes()
-        estimated_bytes_per_block = self.block_size * per_token_bytes
+        estimated_bytes_per_block = self.block_size * self._per_token_kv_bytes
 
         max_blocks = max(1, int(available / estimated_bytes_per_block))
 
@@ -176,6 +176,7 @@ class KVCacheManager:
         self.config.num_kv_heads = num_kv_heads
         self.config.head_dim = head_dim
         self.config.dtype_bytes = dtype_bytes
+        self._per_token_kv_bytes = self._estimate_per_token_kv_bytes()
         self.max_total_blocks = self._estimate_max_blocks()
         logger.info(
             "KV cache re-estimated with model params: max_blocks=%d",

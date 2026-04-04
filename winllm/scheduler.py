@@ -183,8 +183,8 @@ class Scheduler:
 
             # 4. Cleanup finished/failed requests
             if finished:
-                finished_set = set(id(r) for r in finished)
-                self._active_reqs = [r for r in self._active_reqs if id(r) not in finished_set]
+                finished_ids = {r.request_id for r in finished}
+                self._active_reqs = [r for r in self._active_reqs if r.request_id not in finished_ids]
                 for req in finished:
                     self.engine.kv_cache_manager.free_sequence(req.request_id)
                     self._handle_completed(req)
