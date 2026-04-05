@@ -1,6 +1,13 @@
+---
+title: "Architecture"
+category: "wLLm"
+tags: []
+status: "Active"
+created: "2026-04-01"
+---
 # wLLM Architecture & Design
 
-This document provides a comprehensive, visual guide to the software architecture, design patterns, and internal workflows of the WinLLM inference engine. It is designed to help contributors quickly understand how the system is organized, how data flows through the engine, and how memory is managed.
+This document provides a comprehensive, visual guide to the software architecture, design patterns, and internal workflows of the WinLLM inference engine. Built from the ground up in pure Python, it is designed for Windows and inspired by vLLM's memory management principles (though it is not a fork).
 
 > [!NOTE] Table of Contents
 > - [1. High-Level System Architecture](#1-high-level-system-architecture)

@@ -8,7 +8,13 @@ echo.
 
 :: Check if uv is installed
 where uv >nul 2>nul
-if errorlevel 1 goto no_uv
+if errorlevel 1 (
+    echo [INFO] 'uv' not found. Falling back to standard Python/pip.
+    set USE_UV=0
+) else (
+    echo [INFO] 'uv' detected. Using uv for faster installation.
+    set USE_UV=1
+)
 
 echo [1/5] Cleaning up old installation artifacts...
 if exist ".venv" echo Deleting old virtual environment...
@@ -21,20 +27,33 @@ echo Cleanup complete.
 
 echo.
 echo [2/5] Creating fresh virtual environment (.venv)...
-:: PyTorch does not currently support Python 3.14+ wheels yet, so we explicitly pin to 3.12
-uv venv .venv --python 3.12
+if %USE_UV%==1 (
+    :: PyTorch does not currently support Python 3.14+ wheels yet, so we explicitly pin to 3.12
+    uv venv .venv --python 3.12
+) else (
+    python -m venv .venv
+)
 if errorlevel 1 goto error
 
 echo.
 echo [3/5] Installing PyTorch with CUDA 12.4 support...
 echo This may take a few minutes as PyTorch is a large download.
-call .venv\Scripts\activate.bat
-uv pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+if %USE_UV%==1 (
+    call .venv\Scripts\activate.bat
+    uv pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+) else (
+    ".venv\Scripts\python" -m pip install --upgrade pip
+    ".venv\Scripts\python" -m pip install --upgrade torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+)
 if errorlevel 1 goto error
 
 echo.
 echo [4/5] Installing wLLM and its dependencies...
-uv pip install --upgrade -e . --link-mode=copy --extra-index-url https://download.pytorch.org/whl/cu124
+if %USE_UV%==1 (
+    uv pip install --upgrade -e . --link-mode=copy --extra-index-url https://download.pytorch.org/whl/cu124
+) else (
+    ".venv\Scripts\python" -m pip install --upgrade -e . --extra-index-url https://download.pytorch.org/whl/cu124
+)
 if errorlevel 1 goto error
 
 echo.
@@ -59,19 +78,6 @@ if errorlevel 1 echo [ERROR] Hardware verification failed. Check if NVIDIA drive
 
 pause
 goto :eof
-
-:no_uv
-echo [ERROR] 'uv' is not installed or not in PATH.
-echo Please install it first using one of the following commands:
-echo:
-echo PowerShell:
-echo   powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
-echo:
-echo Or via pip:
-echo   pip install uv
-echo.
-pause
-exit /b 1
 
 :error
 echo.

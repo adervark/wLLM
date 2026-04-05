@@ -1,3 +1,10 @@
+---
+title: "CHANGELOG"
+category: "wLLm"
+tags: []
+status: "Active"
+created: "2026-04-01"
+---
 # Changelog
 
 All notable changes to WinLLM are documented here.
@@ -5,7 +12,7 @@ All notable changes to WinLLM are documented here.
 ---
 
 ## [1.0.1] - 2026-04-04
-### Production Bug Fixes & Test Hardening
+### Stability Bug Fixes & Test Hardening
 
 #### Critical Fixes
 - **Prefix caching completely broken** (`scheduler.py`) -- `_try_promote_prefix_cache` used Python `hash()` while `_admit_requests` used SHA-256 via `_get_prefix_hashes()`. Promoted entries were never found during lookup. Fixed to use `_get_prefix_hashes()` consistently.

@@ -1,3 +1,10 @@
+---
+title: "COMMANDS"
+category: "wLLm"
+tags: []
+status: "Active"
+created: "2026-04-01"
+---
 # WinLLM CLI Reference
 
 ```
@@ -141,7 +148,7 @@ wllm benchmark --model <model> [options]
 | `--draft-model` | | None | Path to draft model for speculative decoding |
 | `--tensor-parallel-size` | `-tp` | `1` | GPUs for tensor parallelism |
 | `--device-map-strategy` | | `auto` | GPU distribution strategy |
-| `--cpu-offload` | | `false` | Offload layers to CPU |
+| `--cpu-offload" | | `false` | Offload layers to CPU |
 | `--device` | | `auto` | Device selection |
 | `--auto-config` | | `false` | Auto-detect hardware |
 
@@ -165,7 +172,7 @@ wllm list
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--verbose` | `-v` | `false` | Enable debug logging |
+| `--verbose` | `-v" | `false` | Enable debug logging |
 
 ### Example
 

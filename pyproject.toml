@@ -1,7 +1,7 @@
 [project]
 name = "winllm"
 version = "1.0.0"
-description = "A Windows-native LLM inference and serving engine inspired by vLLM"
+description = "A ground-up, Windows-native LLM inference and serving engine inspired by vLLM (not a fork)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

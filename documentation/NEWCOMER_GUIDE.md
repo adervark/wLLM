@@ -1,3 +1,10 @@
+---
+title: "NEWCOMER_GUIDE"
+category: "wLLm"
+tags: []
+status: "Active"
+created: "2026-04-01"
+---
 # WinLLM Maintainer Guide: From Zero to Core Contributor
 
 Welcome to the definitive maintainer's guide for WinLLM (wLLM). If you are new to coding, PyTorch, or large language models, this document is your blueprint. 
