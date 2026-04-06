@@ -60,8 +60,13 @@ graph TD
 
 ## Rapid Deployment
 
-### Zero-Dependency Installation
-The `install.bat` script handles everything: **Python 3.12 bootstrapping**, virtual environment creation, CUDA-specific PyTorch wheels, and PATH configuration. No pre-installed Python required.
+### Modern Installation (Recommended)
+The `install.ps1` script (or `install.bat` wrapper) handles everything: **Python 3.12 bootstrapping**, virtual environment creation, CUDA-specific PyTorch wheels, and PATH configuration. No pre-installed Python required.
+
+```powershell
+# Run the installer directly
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
 
 ### Manual Configuration
 **Environment (uv - Recommended):**
