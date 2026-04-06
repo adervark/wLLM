@@ -11,6 +11,17 @@ All notable changes to WinLLM are documented here.
 
 ---
 
+## [1.0.2] - 2026-04-06
+### Zero-Dependency Bootstrapping
+
+#### Added
+- **Python & UV Bootstrapping** (`install.bat`) — The installation script now detects systems with no Python or `uv` installed. It automatically fetches and installs the `uv` toolchain via PowerShell and uses it to provision a managed Python 3.12 environment, enabling true one-click setup on clean Windows machines.
+- **Dynamic Session PATH Refresh** (`install.bat`) — Bootstrapped tools are automatically injected into the current command session's `PATH` for zero-restart execution.
+- **`uv python install 3.12` Integration** (`install.bat`) — Guarantees compatible Python 3.12 availability regardless of global system configuration.
+
+#### Documentation
+- **`README.md`** — Updated "Rapid Deployment" section to highlight zero-dependency installation capabilities.
+
 ## [1.0.1] - 2026-04-04
 ### Stability Bug Fixes & Test Hardening
 

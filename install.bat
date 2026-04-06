@@ -8,12 +8,55 @@ echo.
 
 :: Check if uv is installed
 where uv >nul 2>nul
-if errorlevel 1 (
-    echo [INFO] 'uv' not found. Falling back to standard Python/pip.
-    set USE_UV=0
-) else (
-    echo [INFO] 'uv' detected. Using uv for faster installation.
+if %errorlevel% equ 0 (
+    echo [INFO] 'uv' detected.
     set USE_UV=1
+) else (
+    :: Check if python is installed
+    where python >nul 2>nul
+    if %errorlevel% equ 0 (
+        echo [INFO] 'uv' not found, but 'python' detected.
+        set USE_UV=0
+    ) else (
+        echo [WARN] Neither 'uv' nor 'python' were found on your system.
+        echo [INFO] Bootstrapping 'uv' (the modern Python toolchain) to continue...
+        echo.
+        
+        :: Install uv via PowerShell
+        powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+        if errorlevel 1 (
+            echo [ERROR] Failed to install 'uv' via PowerShell. Please install Python or uv manually.
+            goto error
+        )
+        
+        :: Add uv to current session PATH
+        :: The installer usually puts it in %USERPROFILE%\.local\bin or %APPDATA%\revup\bin
+        :: but the most common for the ps1 installer on Windows is %USERPROFILE%\.cargo\bin or %APPDATA%\Roaming\uv\bin
+        if exist "%USERPROFILE%\.cargo\bin\uv.exe" set "PATH=%PATH%;%USERPROFILE%\.cargo\bin"
+        if exist "%APPDATA%\Roaming\uv\bin\uv.exe" set "PATH=%PATH%;%APPDATA%\Roaming\uv\bin"
+        if exist "%USERPROFILE%\.local\bin\uv.exe" set "PATH=%PATH%;%USERPROFILE%\.local\bin"
+        
+        :: Verify uv is now available
+        where uv >nul 2>nul
+        if errorlevel 1 (
+            echo [ERROR] 'uv' was installed but could not be located in the current session PATH.
+            echo Please restart your terminal and run this script again.
+            goto error
+        )
+        
+        echo [SUCCESS] 'uv' bootstrapped successfully.
+        set USE_UV=1
+    )
+)
+
+:: If using uv, ensure Python 3.12 is installed
+if %USE_UV%==1 (
+    echo [INFO] Ensuring Python 3.12 is available via uv...
+    uv python install 3.12
+    if errorlevel 1 (
+        echo [ERROR] Failed to install Python 3.12 via 'uv'.
+        goto error
+    )
 )
 
 echo [1/5] Cleaning up old installation artifacts...

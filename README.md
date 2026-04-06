@@ -60,8 +60,8 @@ graph TD
 
 ## Rapid Deployment
 
-### Double-Click Installation
-The `install.bat` script handles everything: virtual environment creation, CUDA-specific PyTorch wheels, and PATH configuration.
+### Zero-Dependency Installation
+The `install.bat` script handles everything: **Python 3.12 bootstrapping**, virtual environment creation, CUDA-specific PyTorch wheels, and PATH configuration. No pre-installed Python required.
 
 ### Manual Configuration
 **Environment (uv - Recommended):**
