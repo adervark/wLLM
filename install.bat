@@ -8,8 +8,9 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-:: Launch the modern PowerShell installer
-powershell -ExecutionPolicy Bypass -NoProfile -File "%~dp0install.ps1"
+:: Launch the modern PowerShell installer via script injection
+:: (Bypasses Group Policy restrictions that block .ps1 file execution)
+type "%~dp0install.ps1" | powershell -ExecutionPolicy Bypass -NoProfile -Command -
 if %errorlevel% neq 0 (
     echo [ERROR] Installation failed.
     pause
