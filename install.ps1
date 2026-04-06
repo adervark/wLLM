@@ -3,6 +3,9 @@
 
 $ErrorActionPreference = "Stop"
 
+# Enforce TLS 1.2 for modern CDN downloads (Astral/uv/PyTorch)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 function Write-Step ([string]$Step, [string]$Message) {
     Write-Host "`n[$Step] $Message" -ForegroundColor Cyan
 }
@@ -41,13 +44,17 @@ if (-not $uvPath) {
     Invoke-RestMethod -Uri "https://astral.sh/uv/install.ps1" | Invoke-Expression
     
     # Refresh PATH for current session
-    $cargoBin = Join-Path $HOME ".cargo\bin"
-    $appDataBin = Join-Path $env:APPDATA "Roaming\uv\bin"
-    $localBin = Join-Path $HOME ".local\bin"
+    $potentialPaths = @(
+        (Join-Path $env:USERPROFILE ".cargo\bin"),
+        (Join-Path $env:APPDATA "Roaming\uv\bin"),
+        (Join-Path $env:LOCALAPPDATA "bin"),
+        (Join-Path $env:USERPROFILE ".local\bin")
+    )
     
-    @($cargoBin, $appDataBin, $localBin) | ForEach-Object {
-        if (Test-Path $_) {
-            $env:Path = "$_;$env:Path"
+    foreach ($path in $potentialPaths) {
+        if (Test-Path $path) {
+            Write-Info "Found uv at $path. Updating current session path..."
+            $env:Path = "$path;$env:Path"
         }
     }
     

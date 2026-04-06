@@ -3,6 +3,9 @@
 
 $ErrorActionPreference = "Stop"
 
+# Enforce TLS 1.2 for modern CDN downloads (Astral/uv/PyTorch)
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 function Write-Info ([string]$Message) {
     Write-Host "[INFO] $Message" -ForegroundColor Gray
 }
