@@ -24,7 +24,7 @@ wLLM uses a dynamic profiling engine to mathematically tune its performance base
 | **Mobile / Entry-Level** | < 12 GB | 1 – 4 | 2,048 | 4-bit NF4 + SDPA |
 | **Prosumer Desktop** | 12 – 24 GB | 5 – 12 | 4,096 | Mixed Precision + SDPA |
 | **Enthusiast (RTX 4090)** | 24 GB+ | 12 – 32 | 8,192+ | FlashAttention-2 + AWQ |
-Profiles can also be customised using commands.
+|Profiles can also be customised using commands.| ∞ | ∞ | ∞ | Custom |
 ---
 
 ## Architectural Flow: Continuous Batching Engine
