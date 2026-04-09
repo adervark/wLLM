@@ -49,6 +49,11 @@ def main():
             print(f"  Device Name:     {torch.cuda.get_device_name(0)}")
             print(f"  Device Count:    {torch.cuda.device_count()}")
             print(f"  CUDA Built with: {torch.version.cuda}")
+            major, minor = torch.cuda.get_device_capability(0)
+            if major >= 12 and "12.8" not in torch.version.cuda:
+                print(f"  !!! ARCHITECTURE MISMATCH: Blackwell (sm_{major}{minor}) requires CUDA 12.8+")
+                print(f"      Current torch built with: {torch.version.cuda}")
+                print("  HINT: Run 'uv pip install torch --index-url https://download.pytorch.org/whl/cu128'")
         else:
             print("  !!! CUDA NOT AVAILABLE IN TORCH")
             # Check for common mismatch

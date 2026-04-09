@@ -11,6 +11,20 @@ All notable changes to WinLLM are documented here.
 
 ---
 
+## [1.0.3] - 2026-04-09
+### Day Zero Blackwell (RTX 50-series) Support
+
+#### Added
+- **Native Blackwell Support** (sm_120) — Enabled support for the NVIDIA RTX 5060, 5070, 5080, and 5090 series.
+- **CUDA 12.8 Upgrade** (`pyproject.toml`) — Upgraded core PyTorch dependency to CUDA 12.8 package index, providing the necessary `sm_120` kernels missing in older versions.
+- **Blackwell-Specific Optimizations** (`device.py`) — Optimized default batch sizes and context lengths for the increased throughput and memory bandwidth of the Blackwell architecture.
+- **Architecture Mismatch Diagnostics** (`diagnose_gpu.py`) — Added smart detection for Blackwell GPUs with recommendations for the correct CUDA environment.
+
+#### Changed
+- **`bitsandbytes` Upgrade** (`pyproject.toml`) — Bumped to `>=0.45.0` to ensure compatible 4-bit/8-bit kernels for Blackwell.
+
+---
+
 ## [1.0.2] - 2026-04-06
 ### Zero-Dependency Bootstrapping
 

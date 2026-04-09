@@ -42,9 +42,11 @@ class GPUInfo:
         elif self.total_vram_gb >= 40:
             return "workstation"  # A100-40GB, A6000
         elif self.total_vram_gb >= 16:
-            return "desktop"     # RTX 4090 (24GB), 3090, 4080
+            return "desktop"     # RTX 4090/5090 (24GB+), 4080/5080
+        elif self.total_vram_gb >= 10:
+            return "high-end laptop" # RTX 5070M (12GB)
         else:
-            return "laptop"      # RTX 4070M (8GB), 4060M, etc.
+            return "laptop"      # RTX 5060M (8GB), 4060M, etc.
 
 
 
@@ -216,14 +218,17 @@ def _build_defaults(info: DeviceInfo) -> HardwareDefaults:
         return _apply_env_overrides(defaults)
 
     # Dynamic Allocation Math
+    # Blackwell (sm_120) optimization: higher throughput/BW allow for larger context by default
+    is_blackwell = any(g.compute_capability[0] >= 12 for g in info.devices)
+    
     defaults = HardwareDefaults(
         default_quantization="4bit" if info.total_vram_gb < 16 else "none",
-        max_batch_size=max(1, int(info.total_vram_gb / 1.5)), # Scaled dynamically
-        max_model_len=8192 if info.total_vram_gb >= 24 else (4096 if info.total_vram_gb >= 12 else 2048),
+        max_batch_size=max(1, int(info.total_vram_gb / 1.25)) if is_blackwell else max(1, int(info.total_vram_gb / 1.5)),
+        max_model_len=16384 if (is_blackwell and info.total_vram_gb >= 12) else (8192 if info.total_vram_gb >= 24 else (4096 if info.total_vram_gb >= 12 else 2048)),
         device_map_strategy="balanced" if info.device_count > 1 else "auto",
         tensor_parallel_size=info.device_count,
-        gpu_memory_utilization=0.90, # Keep VRAM allowance high for Pooled allocation
-        kv_cache_fraction=0.90,      # Pre-allocate 90% of REMAINING free vram to pool
+        gpu_memory_utilization=0.90,
+        kv_cache_fraction=0.90,
         attention_backend="sdpa"
     )
 

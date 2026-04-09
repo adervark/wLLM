@@ -78,7 +78,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 206.5
   },
   "right": {
     "id": "83c4fdc27716e80c",
@@ -183,7 +183,7 @@
       "bases:Create new base": false
     }
   },
-  "active": "5424bd4d28d34492",
+  "active": "c2777b5bf25123e9",
   "lastOpenFiles": [
     "documentation/Architecture.md",
     "README.md",
