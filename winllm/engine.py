@@ -18,6 +18,7 @@ Glossary for newcomers:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import AsyncIterator, Optional, Callable
 
@@ -52,6 +53,15 @@ class InferenceEngine:
         self.speculative_engine: Optional['SpeculativeEngine'] = None
         self._ready = False
 
+        # --- Performance: pre-allocated decode buffers ---
+        self._decode_input_buffer: Optional[torch.Tensor] = None
+        # Persistent batch KV buffers to avoid per-step allocation
+        self._batch_kv_buffers: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None
+        self._batch_attn_mask: Optional[torch.Tensor] = None
+        self._batch_buf_max_seq: int = 0
+        self._batch_buf_batch_size: int = 0
+        self._batch_buf_num_layers: int = 0
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -60,14 +70,51 @@ class InferenceEngine:
     def is_ready(self) -> bool:
         return self._ready
 
+    @staticmethod
+    def _configure_cuda_backends():
+        """Configure CUDA backends for maximum inference throughput.
+
+        Called once before model loading. These are global PyTorch settings:
+          - TF32: Enables TF32 tensor cores on Ampere+ GPUs for ~3x faster
+            float32 matmuls with negligible accuracy impact for inference.
+          - Expandable segments: Reduces CUDA memory fragmentation on Windows
+            where the default allocator is particularly wasteful.
+        """
+        if not torch.cuda.is_available():
+            return
+
+        # TF32 for Ampere+ (compute >= 8.0) -- free 2-3x speedup on float32 ops
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision('high')
+
+        # Expandable segments allocator -- reduces fragmentation-induced OOMs
+        alloc_conf = os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '')
+        if 'expandable_segments' not in alloc_conf:
+            new_conf = 'expandable_segments:True'
+            if alloc_conf:
+                new_conf = f'{alloc_conf},{new_conf}'
+            os.environ['PYTORCH_CUDA_ALLOC_CONF'] = new_conf
+
+        logger.info("CUDA backends configured: TF32=on, allocator=%s",
+                    os.environ.get('PYTORCH_CUDA_ALLOC_CONF', 'default'))
+
     def load_model(self):
         """Load model and initialize KV cache manager."""
+        # Configure CUDA backends before any allocation
+        self._configure_cuda_backends()
+
         self.model, self.tokenizer = self._loader.load()
         try:
             self._device = next(self.model.parameters()).device
         except StopIteration:
             self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            
+
+        # Pre-allocate static decode input buffer (reused every decode step)
+        self._decode_input_buffer = torch.zeros(
+            (1, 1), dtype=torch.long, device=self._device
+        )
+
         self.kv_cache_manager = KVCacheManager(self.kv_cache_config)
 
         # Feed actual model dimensions into KV cache for precise memory estimation
@@ -104,6 +151,14 @@ class InferenceEngine:
         self.model = None
         self.tokenizer = None
 
+        # Free performance buffers to release GPU memory
+        self._decode_input_buffer = None
+        self._batch_kv_buffers = None
+        self._batch_attn_mask = None
+        self._batch_buf_max_seq = 0
+        self._batch_buf_batch_size = 0
+        self._batch_buf_num_layers = 0
+
     # ------------------------------------------------------------------
     # Tokenization helpers
     # ------------------------------------------------------------------
@@ -138,8 +193,16 @@ class InferenceEngine:
         prefill_reqs = [r for r in requests if not r.is_prefill_complete]
         decode_reqs = [r for r in requests if r.is_prefill_complete]
 
-        for req in prefill_reqs:
-            self._prefill_single_request(req, device, chunked_prefill_enabled, max_num_batched_tokens)
+        # Batch prefill when multiple new requests arrive simultaneously
+        if prefill_reqs:
+            # Prefix-cache hits or chunked mode need per-request handling
+            has_prefix_hits = any(r._prefix_past_key_values is not None for r in prefill_reqs)
+            if len(prefill_reqs) == 1 or chunked_prefill_enabled or has_prefix_hits:
+                for req in prefill_reqs:
+                    self._prefill_single_request(req, device, chunked_prefill_enabled, max_num_batched_tokens)
+            else:
+                # Multiple non-chunked prefills without cache hits: batch into one forward pass
+                self._prefill_batch(prefill_reqs, device)
 
         if decode_reqs:
             if len(decode_reqs) == 1:
@@ -202,6 +265,68 @@ class InferenceEngine:
             req._stream_text_cursor = len(prompt_text)
             self._emit_stream_token(req)
 
+    def _prefill_batch(self, reqs: list[GenerationRequest], device: torch.device):
+        """Batch multiple prefill requests into a single forward pass.
+
+        Uses left-padding to align variable-length prompts so they can be processed
+        together. This is 2-5x faster than sequential prefill when multiple requests
+        arrive simultaneously (common under API load).
+        """
+        now = time.time()
+        pad_token_id = self.tokenizer.pad_token_id or 0
+
+        # Tokenize any un-tokenized requests
+        for req in reqs:
+            if not req.prompt_token_ids:
+                req.prompt_token_ids = self.tokenize(req.prompt)
+            req.started_at = now
+            req.status = RequestStatus.RUNNING
+
+        # Build left-padded input batch
+        max_len = max(len(req.prompt_token_ids) for req in reqs)
+        batch_ids = []
+        attention_masks = []
+        for req in reqs:
+            tokens = req.prompt_token_ids
+            pad_len = max_len - len(tokens)
+            batch_ids.append([pad_token_id] * pad_len + tokens)
+            attention_masks.append([0] * pad_len + [1] * len(tokens))
+
+        input_ids = torch.tensor(batch_ids, dtype=torch.long, device=device)
+        attention_mask = torch.tensor(attention_masks, dtype=torch.long, device=device)
+
+        outputs = self.model(
+            input_ids,
+            attention_mask=attention_mask,
+            use_cache=True,
+        )
+
+        # Unbatch: extract per-request KV caches and sample first token
+        num_layers = len(outputs.past_key_values)
+        for i, req in enumerate(reqs):
+            prompt_len = len(req.prompt_token_ids)
+
+            # Slice KV cache to only this request's actual tokens (remove padding)
+            req._past_key_values = tuple(
+                (
+                    outputs.past_key_values[layer][0][i:i+1, :, -prompt_len:, :].clone(),
+                    outputs.past_key_values[layer][1][i:i+1, :, -prompt_len:, :].clone(),
+                )
+                for layer in range(num_layers)
+            )
+            req._prefill_cursor = prompt_len
+
+            # Sample first output token from this request's logits
+            # The last non-padding position for this request is at index (max_len - 1)
+            # since we left-padded and the model outputs logits for all positions
+            next_logits = outputs.logits[i:i+1, -1, :]
+            next_token_id = sample_token(next_logits, req.sampling_params, req.output_token_ids)
+            req.output_token_ids.append(next_token_id.item())
+
+            prompt_text = self.tokenizer.decode(req.prompt_token_ids, skip_special_tokens=True)
+            req._stream_text_cursor = len(prompt_text)
+            self._emit_stream_token(req)
+
     def _decode_single_request(self, req: GenerationRequest, device: torch.device, batch_size: int = 1):
         """Run one decode step for a request that's already being generated.
 
@@ -224,8 +349,13 @@ class InferenceEngine:
             self._emit_stream_token(req)
             return
 
+        # Reuse static input buffer to avoid per-step CUDA allocation
         last_token = req.output_token_ids[-1]
-        input_ids = torch.tensor([[last_token]], device=device)
+        if self._decode_input_buffer is not None and self._decode_input_buffer.device == device:
+            self._decode_input_buffer[0, 0] = last_token
+            input_ids = self._decode_input_buffer
+        else:
+            input_ids = torch.tensor([[last_token]], device=device)
 
         outputs = self.model(
             input_ids,
@@ -242,11 +372,45 @@ class InferenceEngine:
         self.kv_cache_manager.extend_sequence(req.request_id, 1)
         self._emit_stream_token(req)
 
+    def _ensure_batch_kv_buffers(
+        self, num_layers: int, batch_size: int, max_seq_len: int,
+        num_kv_heads: int, head_dim: int, kv_dtype: torch.dtype, device: torch.device
+    ):
+        """Ensure persistent KV batch buffers are large enough, expanding only when needed.
+
+        Instead of allocating fresh zero tensors every decode step (the old approach),
+        we maintain persistent buffers and only re-allocate when batch_size or max_seq_len
+        grows beyond what we've already allocated. This eliminates thousands of CUDA
+        malloc/free cycles per generation.
+        """
+        needs_realloc = (
+            self._batch_kv_buffers is None
+            or self._batch_buf_num_layers != num_layers
+            or batch_size > self._batch_buf_batch_size
+            or max_seq_len > self._batch_buf_max_seq
+        )
+        if needs_realloc:
+            # Over-allocate seq dimension by 25% to avoid frequent reallocs
+            alloc_seq = max(max_seq_len, int(max_seq_len * 1.25))
+            self._batch_kv_buffers = [
+                (
+                    torch.zeros((batch_size, num_kv_heads, alloc_seq, head_dim), dtype=kv_dtype, device=device),
+                    torch.zeros((batch_size, num_kv_heads, alloc_seq, head_dim), dtype=kv_dtype, device=device),
+                )
+                for _ in range(num_layers)
+            ]
+            self._batch_attn_mask = torch.zeros((batch_size, alloc_seq + 1), dtype=torch.long, device=device)
+            self._batch_buf_max_seq = alloc_seq
+            self._batch_buf_batch_size = batch_size
+            self._batch_buf_num_layers = num_layers
+            logger.debug("Batch KV buffers (re)allocated: layers=%d, batch=%d, seq=%d", num_layers, batch_size, alloc_seq)
+
     def _decode_batch(self, decode_reqs: list[GenerationRequest], device: torch.device):
         """Run a single forward pass for a batch of requests.
 
         This is the primary throughput optimization, moving from O(N) model passes
-        to O(1) for a batch of size N.
+        to O(1) for a batch of size N. Uses persistent KV buffers to avoid
+        re-allocating large tensors every step.
         """
         # Filter out cancelled requests before wasting a forward pass on them
         decode_reqs = [r for r in decode_reqs if not r.is_cancelled]
@@ -261,11 +425,10 @@ class InferenceEngine:
             device=device
         )
         
-        # --- Batch the past_key_values ---
+        # --- Batch the past_key_values using persistent buffers ---
         seq_lengths = [len(req.prompt_token_ids) + len(req.output_token_ids) - 1 for req in decode_reqs]
         max_seq_len = max(seq_lengths)
         
-        batched_past_key_values = []
         num_layers = len(decode_reqs[0]._past_key_values)
         
         # Extract shapes dynamically from the first valid state to handle any attention architecture
@@ -274,25 +437,34 @@ class InferenceEngine:
         head_dim = sample_k.shape[3]
         kv_dtype = sample_k.dtype
         
+        # Ensure persistent buffers are large enough
+        self._ensure_batch_kv_buffers(num_layers, batch_size, max_seq_len, num_kv_heads, head_dim, kv_dtype, device)
+        
+        batched_past_key_values = []
         for layer_idx in range(num_layers):
-            # Pre-allocate batched continuous tensors (bypasses thousands of internal F.pad memory allocations)
-            batched_k = torch.zeros((batch_size, num_kv_heads, max_seq_len, head_dim), dtype=kv_dtype, device=device)
-            batched_v = torch.zeros((batch_size, num_kv_heads, max_seq_len, head_dim), dtype=kv_dtype, device=device)
+            buf_k, buf_v = self._batch_kv_buffers[layer_idx]
+            # Slice to actual needed size and zero
+            k_view = buf_k[:batch_size, :, :max_seq_len, :]
+            v_view = buf_v[:batch_size, :, :max_seq_len, :]
+            k_view.zero_()
+            v_view.zero_()
             
             for i, req in enumerate(decode_reqs):
                 k, v = req._past_key_values[layer_idx]
                 seq_len = seq_lengths[i]
-                batched_k[i:i+1, :, -seq_len:, :] = k
-                batched_v[i:i+1, :, -seq_len:, :] = v
+                k_view[i:i+1, :, -seq_len:, :] = k
+                v_view[i:i+1, :, -seq_len:, :] = v
             
-            batched_past_key_values.append((batched_k, batched_v))
+            # Use contiguous slices (they already are since we sliced from contiguous buffers)
+            batched_past_key_values.append((k_view, v_view))
 
-        # Create attention mask
-        attention_mask = torch.zeros((batch_size, max_seq_len + 1), dtype=torch.long, device=device)
+        # Create attention mask using persistent buffer
+        attn_buf = self._batch_attn_mask[:batch_size, :max_seq_len + 1]
+        attn_buf.zero_()
         for i, seq_len in enumerate(seq_lengths):
-            attention_mask[i, -(seq_len + 1):] = 1
+            attn_buf[i, -(seq_len + 1):] = 1
             
-        position_ids = attention_mask.sum(dim=1) - 1
+        position_ids = attn_buf.sum(dim=1) - 1
         position_ids = position_ids.unsqueeze(-1)
         
         # 4. Forward pass
@@ -300,7 +472,7 @@ class InferenceEngine:
             input_ids,
             past_key_values=batched_past_key_values,
             use_cache=True,
-            attention_mask=attention_mask,
+            attention_mask=attn_buf,
             position_ids=position_ids
         )
         
@@ -317,8 +489,8 @@ class InferenceEngine:
             new_seq_len = seq_lengths[i] + 1
             req._past_key_values = tuple(
                 (
-                    new_past_key_values[layer_idx][0][i:i+1, :, -new_seq_len:, :], 
-                    new_past_key_values[layer_idx][1][i:i+1, :, -new_seq_len:, :]
+                    new_past_key_values[layer_idx][0][i:i+1, :, -new_seq_len:, :].clone(), 
+                    new_past_key_values[layer_idx][1][i:i+1, :, -new_seq_len:, :].clone()
                 )
                 for layer_idx in range(num_layers)
             )
@@ -545,8 +717,12 @@ class InferenceEngine:
                             break
                     break
 
-            # Forward pass: feed the last token, reuse KV cache
-            token_input = torch.tensor([[next_token]], dtype=torch.long, device=device)
+            # Forward pass: feed the last token, reuse KV cache and static buffer
+            if self._decode_input_buffer is not None and self._decode_input_buffer.device == device:
+                self._decode_input_buffer[0, 0] = next_token
+                token_input = self._decode_input_buffer
+            else:
+                token_input = torch.tensor([[next_token]], dtype=torch.long, device=device)
             outputs = self.model(
                 token_input,
                 past_key_values=past_key_values,

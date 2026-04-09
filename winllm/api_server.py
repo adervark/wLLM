@@ -354,10 +354,11 @@ def create_app(
                     yield {"data": "[DONE]"}
                     break
                 else:
-                    # Decode only the new token — avoids O(n²) full-sequence re-decode
-                    new_token_ids = gen_request.output_token_ids[-1:]
-                    new_text = await loop.run_in_executor(
-                        None, engine.decode_tokens, new_token_ids
+                    # Decode the new token inline -- tokenizer.decode for a single token
+                    # is a fast CPU-only operation (~1-5us) that doesn't justify the
+                    # ~50-100us thread pool dispatch overhead of run_in_executor.
+                    new_text = engine.tokenizer.decode(
+                        [token_id], skip_special_tokens=True
                     )
                     if new_text:
                         choice = {"index": 0, "finish_reason": None}

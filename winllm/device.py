@@ -160,6 +160,7 @@ class DeviceInfo:
                 "max_model_len": self.defaults.max_model_len,
                 "tensor_parallel_size": self.defaults.tensor_parallel_size,
                 "attention_backend": self.defaults.attention_backend,
+                "dtype": self.defaults.default_dtype,
             },
         }
 
@@ -176,6 +177,7 @@ def _apply_env_overrides(defaults: HardwareDefaults) -> HardwareDefaults:
         "WINLLM_GPU_UTILIZATION": ("gpu_memory_utilization", float),
         "WINLLM_KV_FRACTION": ("kv_cache_fraction", float),
         "WINLLM_ATTENTION_BACKEND": ("attention_backend", str),
+        "WINLLM_DTYPE": ("default_dtype", str),
     }
 
     for env_var, (field_name, type_func) in mapping.items():
@@ -201,6 +203,7 @@ class HardwareDefaults:
     gpu_memory_utilization: float
     kv_cache_fraction: float
     attention_backend: str = "sdpa" # "sdpa", "flash_attention_2", "eager"
+    default_dtype: str = "float16" # "float16" or "bfloat16"
 
 def _build_defaults(info: DeviceInfo) -> HardwareDefaults:
     """Build auto-tuned defaults dynamically from actual hardware."""
@@ -232,10 +235,13 @@ def _build_defaults(info: DeviceInfo) -> HardwareDefaults:
         attention_backend="sdpa"
     )
 
-    # Auto-detect attention backend based on compute capability
+    # Auto-detect attention backend and dtype based on compute capability
     min_compute = min(g.compute_capability for g in info.devices)
     if min_compute >= (8, 0):
         defaults.attention_backend = "flash_attention_2"
+        # Ampere+ natively supports bfloat16 at full throughput with better
+        # numerical stability than float16 (larger exponent range, no NaN overflow)
+        defaults.default_dtype = "bfloat16"
 
     return _apply_env_overrides(defaults)
 

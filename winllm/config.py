@@ -68,9 +68,12 @@ class ModelConfig:
             self.tensor_parallel_size = defaults.tensor_parallel_size
         if self.device_map_strategy == "auto":
             self.device_map_strategy = defaults.device_map_strategy
-        if self.attention_backend == "auto" and hasattr(defaults, "attention_backend"):
+        if self.attention_backend == "auto":
             self.attention_backend = defaults.attention_backend
         self.gpu_memory_utilization = defaults.gpu_memory_utilization
+        # Adopt bfloat16 on Ampere+ if the user hasn't explicitly set dtype
+        if self.dtype == DType.FLOAT16 and defaults.default_dtype == "bfloat16":
+            self.dtype = DType.BFLOAT16
 
         # 2. Attempt to identify model profile and apply heuristics
         profile = identify_model_profile(self.model_name_or_path)

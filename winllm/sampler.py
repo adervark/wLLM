@@ -113,7 +113,7 @@ def sample_token(
     generated_ids: list[int] | list[list[int]] | None = None,
     generator: torch.Generator | None = None,
 ) -> torch.Tensor:
-    """Full batched sampling pipeline: penalties → temperature → top-k → top-p → sample."""
+    """Full batched sampling pipeline: penalties -> temperature -> top-k -> top-p -> sample."""
     batch_size = logits.shape[0]
     params_list = [params] * batch_size if isinstance(params, SamplingParams) else params
     
@@ -122,20 +122,30 @@ def sample_token(
     top_ks = [p.top_k for p in params_list]
     top_ps = [p.top_p for p in params_list]
     
-    # Fast path check for pure greedy (all temps == 0) and no penalties needed
+    # Fast path: pure greedy with no repetition penalty -- skip everything
     all_greedy = all(t == 0 for t in temperatures)
-    if all_greedy and all(p == 1.0 for p in penalties):
+    no_penalties = all(p == 1.0 for p in penalties)
+    if all_greedy and no_penalties:
         return torch.argmax(logits, dim=-1)
     
-    # 1. Pipeline modifications (clone to avoid corrupting the caller's tensor,
-    #    since apply_temperature uses in-place div_)
+    # Fast path: greedy with only repetition penalty -- minimal work
+    if all_greedy and not no_penalties:
+        logits = logits.clone()
+        logits = apply_repetition_penalty(logits, generated_ids, penalties)
+        return torch.argmax(logits, dim=-1)
+    
+    # Clone to avoid corrupting the caller's tensor (apply_temperature uses in-place div_)
     logits = logits.clone()
-    logits = apply_repetition_penalty(logits, generated_ids, penalties)
+    
+    # Only apply repetition penalty if any penalty != 1.0
+    if not no_penalties:
+        logits = apply_repetition_penalty(logits, generated_ids, penalties)
+    
     logits = apply_temperature(logits, temperatures)
     logits = apply_top_k(logits, top_ks)
     logits = apply_top_p(logits, top_ps)
     
-    # 2. Multinomial sampling for non-greedy rows
+    # Multinomial sampling for non-greedy rows
     probs = F.softmax(logits, dim=-1)
     # Multinomial needs valid probabilities. Replace NaNs if all valid probs were masked:
     if torch.isnan(probs).any():
@@ -147,7 +157,7 @@ def sample_token(
         # Fallback if multinomial fails due to 0-probability across all tokens
         sampled = torch.argmax(logits, dim=-1)
         
-    # 3. Handle greedy overrides where temp == 0
+    # Handle greedy overrides where temp == 0 in a mixed batch
     if not all_greedy:
         greedy_mask = torch.tensor([t == 0 for t in temperatures], dtype=torch.bool, device=logits.device)
         if greedy_mask.any():
