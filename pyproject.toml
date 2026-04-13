@@ -16,7 +16,7 @@ dependencies = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",
     "sse-starlette>=1.8.0",
-    "pydantic>=2.0.0",
+    "pydantic>=2.12.5",
     "optimum>=2.1.0",
     "onnxruntime-gpu>=1.24.3",
 ]
