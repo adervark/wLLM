@@ -9,7 +9,7 @@ license = { text = "MIT" }
 dependencies = [
     "torch>=2.1.0",
     "torchvision>=0.16.0",
-    "torchaudio>=2.1.0",
+    "torchaudio>=2.11.0",
     "transformers>=4.36.0",
     "accelerate>=0.25.0",
     "bitsandbytes>=0.45.0",
