@@ -1,0 +1,9 @@
+[build-system]
+requires = ["setuptools>=64", "pybind11>=2.12"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "winllm-sampling"
+version = "0.1.0"
+description = "Fused CUDA sampling kernel for wLLM — optional accelerator, wLLM falls back to the pure-torch pipeline without it. Requires the CUDA toolkit (nvcc) and MSVC to build."
+requires-python = ">=3.10"

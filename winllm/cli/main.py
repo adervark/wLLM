@@ -1,0 +1,156 @@
+"""CLI entry point for WinLLM: argument parsing and command dispatch."""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+
+from .. import __version__
+from .commands import cmd_benchmark, cmd_chat, cmd_detect, cmd_list, cmd_remove, cmd_serve
+
+# Windows console encoding fix
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
+
+
+# Third-party libraries that flood INFO during model load; capped at
+# WARNING unless the user asks for verbose output.
+_NOISY_LOGGERS = ("transformers", "urllib3", "filelock", "accelerate", "httpx", "huggingface_hub")
+
+
+def setup_logging(verbose: bool = False):
+    """Configure logging on the shared rich console."""
+    from rich.logging import RichHandler
+    from .console import console
+
+    level = logging.DEBUG if verbose else logging.INFO
+    handler = RichHandler(
+        console=console,
+        show_path=verbose,
+        show_time=verbose,
+        rich_tracebacks=True,
+    )
+    logging.basicConfig(
+        level=level,
+        format="%(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[handler],
+        force=True,
+    )
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(
+            logging.NOTSET if verbose else logging.WARNING
+        )
+
+
+def _add_common_model_args(parser):
+    """Add model-related arguments shared by serve, chat, and benchmark."""
+    parser.add_argument("--model", "-m", required=True, help="HuggingFace model name or path")
+    parser.add_argument("--quantization", "-q", choices=["auto", "none", "4bit", "8bit", "awq", "gptq"], default="auto")
+    parser.add_argument("--max-model-len", type=int, default=None, help="Auto-detected if not specified")
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--force-architecture", help="Manually override model architecture type")
+    parser.add_argument("--cuda-graphs", action="store_true",
+                        help="Capture single-request decode in a CUDA graph (experimental; "
+                             "auto-falls back if the model isn't graph-safe)")
+    parser.add_argument("--suffix-decoding", action="store_true",
+                        help="Model-free speculative decoding via suffix matching "
+                             "(no draft model needed; biggest wins on repetitive/"
+                             "structured/agentic output)")
+    parser.add_argument("--verbose", "-v", action="store_true")
+
+
+def _add_scaling_args(parser):
+    """Add common scaling arguments to a subparser."""
+    parser.add_argument("--attention-backend", default="auto",
+                        choices=["auto", "sdpa", "flash_attention_2", "eager"],
+                        help="Attention backend: auto, sdpa, flash_attention_2, eager")
+    parser.add_argument("--draft-model", default=None,
+                        help="Path to draft model for speculative decoding")
+    parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1,
+                        help="Number of GPUs for tensor parallelism")
+    parser.add_argument("--device-map-strategy", choices=["auto", "balanced", "balanced_low_0", "sequential"],
+                        default="auto", help="How to distribute model across GPUs")
+    parser.add_argument("--cpu-offload", action="store_true",
+                        help="Offload excess layers to CPU RAM")
+    parser.add_argument("--device", default="auto",
+                        help="Device to use: auto, cuda, cuda:0, cpu")
+    parser.add_argument("--auto-config", action="store_true",
+                        help="Auto-detect hardware and set optimal config")
+    parser.add_argument("--backend", default="pytorch",
+                        choices=["pytorch", "onnxruntime", "directml"],
+                        help="Inference backend: pytorch, onnxruntime, directml")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="wLLM",
+        description="wLLM — Windows-native LLM inference engine",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # --- serve ---
+    serve_parser = subparsers.add_parser("serve", help="Start OpenAI-compatible API server")
+    _add_common_model_args(serve_parser)
+    serve_parser.add_argument("--host", default="0.0.0.0")
+    serve_parser.add_argument("--port", "-p", type=int, default=8000)
+    serve_parser.add_argument("--max-batch-size", type=int, default=4)
+    serve_parser.add_argument("--model-alias", default=None, help="Override model name in API responses")
+    serve_parser.add_argument("--gpu-memory-utilization", type=float, default=None)
+    _add_scaling_args(serve_parser)
+
+    # --- chat ---
+    chat_parser = subparsers.add_parser("chat", help="Interactive chat in terminal")
+    _add_common_model_args(chat_parser)
+    chat_parser.add_argument("--max-tokens", type=int, default=512)
+    chat_parser.add_argument("--temperature", type=float, default=0.7)
+    chat_parser.add_argument("--system-prompt", "-s", default=None, help="System prompt")
+    _add_scaling_args(chat_parser)
+
+    # --- benchmark ---
+    bench_parser = subparsers.add_parser("benchmark", help="Run throughput benchmark")
+    _add_common_model_args(bench_parser)
+    bench_parser.add_argument("--max-tokens", type=int, default=256)
+    bench_parser.add_argument("--num-prompts", type=int, default=5)
+    _add_scaling_args(bench_parser)
+
+    # --- list ---
+    list_parser = subparsers.add_parser("list", help="List downloaded models from HuggingFace cache")
+    list_parser.add_argument("--verbose", "-v", action="store_true")
+
+    # --- detect ---
+    detect_parser = subparsers.add_parser("detect", help="Detect and display hardware info")
+    detect_parser.add_argument("--json", action="store_true", help="Also print JSON output")
+    detect_parser.add_argument("--verbose", "-v", action="store_true")
+
+    # --- remove ---
+    remove_parser = subparsers.add_parser("remove", help="Remove a downloaded model from HuggingFace cache")
+    remove_parser.add_argument("model", nargs="?", help="Model ID to remove, e.g., 'mistralai/Mistral-7B-v0.1'")
+    remove_parser.add_argument("--all", action="store_true", help="Remove all downloaded models from HuggingFace cache")
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    setup_logging(getattr(args, "verbose", False))
+
+    cmd_map = {
+        "serve": cmd_serve,
+        "chat": cmd_chat,
+        "benchmark": cmd_benchmark,
+        "list": cmd_list,
+        "detect": cmd_detect,
+        "remove": cmd_remove,
+    }
+    cmd_map[args.command](args)
+
+
+if __name__ == "__main__":
+    main()
