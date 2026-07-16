@@ -34,8 +34,42 @@ GITHUB_DARK = Theme(
         "logging.level.critical": "bold #f85149",
         "rule.line": "#30363d",
         "table.caption": "#8b949e",
-        "markdown.link": "#58a6ff",
         "status.spinner": "#58a6ff",
+        # Markdown: rich's defaults (yellow bullets, magenta block quotes,
+        # cyan inline code) clash with the palette — mute them to match.
+        "markdown.link": "#58a6ff",
+        "markdown.link_url": "#58a6ff underline",
+        "markdown.code": "#79c0ff on #161b22",
+        "markdown.block_quote": "#8b949e",
+        "markdown.item.bullet": "#8b949e",
+        "markdown.item.number": "#8b949e",
+        "markdown.hr": "#30363d",
+        # Repr highlighting (applied to log lines and printed objects):
+        # rich's defaults color numbers cyan, strings green, and paths
+        # magenta. Restrict to blue for values and gray for structure.
+        "repr.number": "#79c0ff",
+        "repr.number_complex": "#79c0ff",
+        "repr.str": "#a5d6ff",
+        "repr.bool_true": "#79c0ff italic",
+        "repr.bool_false": "#79c0ff italic",
+        "repr.none": "#79c0ff italic",
+        "repr.url": "#58a6ff underline",
+        "repr.path": "#8b949e",
+        "repr.filename": "#c9d1d9",
+        "repr.call": "#e6edf3",
+        "repr.attrib_name": "#79c0ff",
+        "repr.attrib_value": "#a5d6ff",
+        "repr.tag_start": "#8b949e",
+        "repr.tag_end": "#8b949e",
+        "repr.tag_name": "#79c0ff",
+        "repr.tag_contents": "#c9d1d9",
+        "repr.uuid": "#79c0ff",
+        "repr.ipv4": "#79c0ff",
+        "repr.ipv6": "#79c0ff",
+        "repr.eui48": "#79c0ff",
+        "repr.eui64": "#79c0ff",
+        "repr.ellipsis": "#8b949e",
+        "repr.indent": "#8b949e",
     }
 )
 

@@ -14,6 +14,31 @@ from winllm.hardware.defaults import (
 )
 
 
+# ─── configure_cuda_backends ────────────────────────────────────────────────
+
+
+class TestConfigureCudaBackends:
+    """expandable_segments is Linux-only; setting it on Windows makes torch
+    print a UserWarning at model load and ignore the value."""
+
+    def _configure(self, monkeypatch, platform):
+        import sys
+        from unittest.mock import patch
+        from winllm.hardware.cuda import configure_cuda_backends
+
+        monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+        monkeypatch.setattr(sys, "platform", platform)
+        with patch("torch.cuda.is_available", return_value=True):
+            configure_cuda_backends()
+        return os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+
+    def test_windows_does_not_set_expandable_segments(self, monkeypatch):
+        assert "expandable_segments" not in self._configure(monkeypatch, "win32")
+
+    def test_linux_sets_expandable_segments(self, monkeypatch):
+        assert "expandable_segments:True" in self._configure(monkeypatch, "linux")
+
+
 # ─── GPUInfo ────────────────────────────────────────────────────────────────
 
 

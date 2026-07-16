@@ -319,6 +319,20 @@ class TestRichChatRenderer:
         renderer.close()
         renderer.close()  # must not raise
 
+    def test_refresh_rate_is_smooth(self):
+        # 10 fps repaints 4-5 tokens at a time at typical decode speeds;
+        # 24+ fps keeps the stream appearing token-by-token.
+        from rich.console import Console
+        from winllm.cli.console import GITHUB_DARK
+        from winllm.cli.formatting import RichChatRenderer
+
+        console = Console(record=True, width=80, force_terminal=False, theme=GITHUB_DARK)
+        renderer = RichChatRenderer(console=console)
+        try:
+            assert renderer._live.refresh_per_second >= 24
+        finally:
+            renderer.close()
+
     def test_feed_after_close_is_ignored(self):
         from rich.console import Console
         from winllm.cli.console import GITHUB_DARK

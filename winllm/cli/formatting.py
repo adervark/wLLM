@@ -101,7 +101,8 @@ class RichChatRenderer:
     Thinking text (``<think>...</think>``) streams as muted text under a muted
     "thinking" rule; the answer streams as live-rendered Markdown, so code
     blocks and emphasis appear formatted as tokens arrive. Refresh is capped
-    at 10/s to limit re-render flicker.
+    at 24/s: high enough that tokens appear individually at typical decode
+    speeds, low enough to bound markdown re-render cost.
     """
 
     def __init__(self, console: Optional[Console] = None):
@@ -115,7 +116,7 @@ class RichChatRenderer:
         self._closed = False
         self._live = Live(
             console=self._console,
-            refresh_per_second=10,
+            refresh_per_second=24,
             vertical_overflow="visible",
         )
         self._live.start()

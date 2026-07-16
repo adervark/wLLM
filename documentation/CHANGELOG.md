@@ -13,6 +13,27 @@ All notable changes to WinLLM are documented here.
 
 ---
 
+## [Unreleased] - 2026-07-16
+### Clean startup output and smoother chat streaming
+
+Every model load printed two spurious diagnostics: transformers 5.x deprecated
+the `torch_dtype=` kwarg, and torch warned that `expandable_segments` (which
+`configure_cuda_backends` forced into `PYTORCH_CUDA_ALLOC_CONF`) is not
+supported on Windows and ignored it.
+
+#### Fixed
+- **`models/loader.py`, `backends/directml.py`**: pass `dtype=` to
+  `from_pretrained` instead of the deprecated `torch_dtype=`.
+- **`hardware/cuda.py`**: only set `expandable_segments:True` off-Windows;
+  on win32 it was a no-op that made torch emit a UserWarning at load.
+
+#### Changed
+- **`cli/formatting.py`**: chat live-render refresh raised 10 → 24 fps so
+  streamed tokens appear individually at typical decode speeds instead of
+  4-5 at a time.
+
+---
+
 ## [Unreleased] - 2026-07-15
 ### Size-aware auto quantization
 

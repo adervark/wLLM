@@ -44,7 +44,7 @@ class DirectMLBackend(InferenceBackend):
         dml_device = torch_directml.device()
         model = AutoModelForCausalLM.from_pretrained(
             model_config.model_name_or_path,
-            torch_dtype=model_config.torch_dtype,
+            dtype=model_config.torch_dtype,
             trust_remote_code=model_config.trust_remote_code,
         ).to(dml_device)
 

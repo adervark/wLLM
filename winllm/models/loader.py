@@ -119,7 +119,7 @@ class ModelLoader:
         if quantization_config is not None:
             load_kwargs["quantization_config"] = quantization_config
         else:
-            load_kwargs["torch_dtype"] = config.torch_dtype
+            load_kwargs["dtype"] = config.torch_dtype
 
         # Optimized Attention Backend (SDPA, Flash Attention 2)
         if config.attention_backend and config.attention_backend != "auto":

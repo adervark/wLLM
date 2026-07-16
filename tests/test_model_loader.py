@@ -229,6 +229,26 @@ class TestResolveDeviceMap:
         assert loader._resolve_device_map() == config.device_map_strategy
 
 
+# --- ModelLoader._build_load_kwargs ---
+
+
+class TestBuildLoadKwargs:
+    def test_unquantized_passes_dtype_not_torch_dtype(self):
+        # transformers 5.x deprecated torch_dtype= and warns on every load
+        config = ModelConfig(model_name_or_path="test", quantization=QuantizationType.NONE)
+        loader = ModelLoader(config)
+        kwargs = loader._build_load_kwargs(config, None, "auto")
+        assert kwargs["dtype"] == config.torch_dtype
+        assert "torch_dtype" not in kwargs
+
+    def test_quantized_omits_dtype(self):
+        config = ModelConfig(model_name_or_path="test", quantization=QuantizationType.NF4)
+        loader = ModelLoader(config)
+        kwargs = loader._build_load_kwargs(config, build_quantization_config(config), "auto")
+        assert "dtype" not in kwargs
+        assert "torch_dtype" not in kwargs
+
+
 # --- ModelLoader lifecycle ---
 
 
