@@ -236,11 +236,13 @@ class Scheduler:
             )
             req._stop_check_cursor += 1
 
-        for s in stop_strings:
-            idx = req._running_text.find(s)
-            if idx != -1:
-                req.output_text = req._running_text[:idx]
-                return True
+        # Earliest occurrence wins, not list order, so the trimmed output
+        # matches what the streaming StopStringGate emits.
+        hits = [i for i in (req._running_text.find(s) for s in stop_strings) if i != -1]
+        if hits:
+            req.output_text = req._running_text[: min(hits)]
+            req._stop_trimmed = True
+            return True
         return False
 
     def _admit_requests(self):
@@ -253,6 +255,20 @@ class Scheduler:
             req = self._policy.select(self._waiting)
             if req is None:
                 break
+
+            # A request cancelled while queued (e.g. client disconnect) must
+            # not cost a KV allocation and a prefill pass.
+            if req.is_cancelled:
+                req.status = RequestStatus.CANCELLED
+                req.finish_reason = "cancelled"
+                req.finished_at = time.time()
+                if req._token_callback:
+                    req._token_callback(0, True)
+                if req._stream_callback:
+                    req._stream_callback("", True)
+                self._handle_completed(req)
+                self._signal_completion(req)
+                continue
 
             result = admission.try_admit(req)
             if result is AdmissionResult.ADMITTED:
@@ -327,6 +343,8 @@ class Scheduler:
         if len(self._waiting) >= self.config.max_waiting_requests:
             request.status = RequestStatus.FAILED
             request.error = "Server overloaded — request queue full"
+            self.stats.total_requests += 1
+            self.stats.failed_requests += 1
             return request
 
         self.stats.total_requests += 1
@@ -347,7 +365,12 @@ class Scheduler:
         await request._completed_event.wait()
 
         # Offload expensive final text decoding from GPU loop
-        if request.status == RequestStatus.COMPLETED and not request._stream_callback and not request.output_text:
+        if (
+            request.status == RequestStatus.COMPLETED
+            and not request._stream_callback
+            and not request.output_text
+            and not request._stop_trimmed
+        ):
             loop = asyncio.get_running_loop()
             request.output_text = await loop.run_in_executor(
                 None, self.engine.decode_tokens, request.output_token_ids

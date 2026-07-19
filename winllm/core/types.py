@@ -74,6 +74,9 @@ class GenerationRequest:
     # scheduler for stop-string checks (avoids O(n²) full re-decoding per step).
     _running_text: str = field(default="", repr=False)
     _stop_check_cursor: int = field(default=0, repr=False)
+    # True once a stop string trimmed output_text — the trimmed text (possibly
+    # empty) is final and must not be overwritten by a full re-decode.
+    _stop_trimmed: bool = field(default=False, repr=False)
     _past_key_values: Optional[tuple] = field(default=None, repr=False)
     _prefix_cache_token_len: int = field(default=0, repr=False)
     _stream_text_cursor: int = field(default=0, repr=False)

@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from ..core.types import RequestStatus
 from ..sampling import sample_token
 from .eager import eager_decode_step
 
@@ -59,8 +60,8 @@ class DecodeRunner:
             tokens_before = len(req.output_token_ids)
             speculative.step(req)
             tokens_added = len(req.output_token_ids) - tokens_before
-            if tokens_added > 0:
-                self._runtime.kv_cache_manager.extend_sequence(req.request_id, tokens_added)
+            if tokens_added > 0 and not self._commit_tokens(req, tokens_added):
+                return
             self._emitter.emit(req)
             return
 
@@ -74,8 +75,22 @@ class DecodeRunner:
         )
         req.output_token_ids.append(next_token_id.item())
 
-        self._runtime.kv_cache_manager.extend_sequence(req.request_id, 1)
+        if not self._commit_tokens(req, 1):
+            return
         self._emitter.emit(req)
+
+    def _commit_tokens(self, req: "GenerationRequest", count: int) -> bool:
+        """Account newly generated tokens in the KV budget.
+
+        When even prefix-cache eviction cannot make room, the request is
+        failed so the scheduler frees its blocks — silently continuing would
+        let the real cache grow past the budget until CUDA OOM.
+        """
+        if self._runtime.kv_cache_manager.extend_sequence(req.request_id, count):
+            return True
+        req.status = RequestStatus.FAILED
+        req.error = "KV cache exhausted during decode"
+        return False
 
     def decode_batch(self, decode_reqs: list["GenerationRequest"], device: torch.device) -> None:
         """Run a single forward pass for a batch of requests.
@@ -138,8 +153,8 @@ class DecodeRunner:
         # 4. Commit sampled tokens and stream them
         for i, req in enumerate(decode_reqs):
             req.output_token_ids.append(next_token_ids[i].item())
-            self._runtime.kv_cache_manager.extend_sequence(req.request_id, 1)
-            self._emitter.emit(req)
+            if self._commit_tokens(req, 1):
+                self._emitter.emit(req)
 
         # 5. Expose each request's updated cache as a zero-copy view (no clone).
         self._batch_cache.expose_views(decode_reqs, [sl + 1 for sl in seq_lengths])

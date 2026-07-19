@@ -46,7 +46,14 @@ class AdmissionController:
 
         prompt_len = len(prompt_token_ids)
         max_new = req.sampling_params.max_tokens
-        if self._kv.can_allocate(prompt_len + max_new - matched_len):
+        needed_tokens = prompt_len + max_new - matched_len
+        if not self._kv.can_allocate(needed_tokens):
+            # Cached prefixes are reclaimable budget: evict before rejecting,
+            # so a request is only refused when it genuinely cannot fit.
+            self._kv.ensure_free_blocks(
+                self._kv.allocator.blocks_needed(needed_tokens)
+            )
+        if self._kv.can_allocate(needed_tokens):
             self._kv.allocate_sequence(
                 req.request_id,
                 prompt_len,

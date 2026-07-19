@@ -132,6 +132,87 @@ class TestFailureCleanup:
         assert wait_until(lambda: len(engine.kv_cache_manager.allocator.sequences) == 0)
 
 
+class MultiTokenEngine(ScriptedEngine):
+    """Engine double that commits several tokens in a single step
+    (like speculative decoding does)."""
+
+    def generate_step(self, requests, **kwargs):
+        for req in requests:
+            req._prefill_cursor = len(req.prompt_token_ids)
+            for token in self.script:
+                req.output_token_ids.append(token)
+        return requests
+
+
+class TestStopStringPriority:
+    def test_trims_at_earliest_occurrence_not_list_order(self):
+        # One step commits "ab". With stop=["b", "a"], "a" occurs first in the
+        # text and must win, even though "b" is listed first.
+        engine = MultiTokenEngine(script=[1, 2])
+        req, _ = run_request(engine, SamplingParams(max_tokens=50, stop=["b", "a"]))
+        assert req.finish_reason == "stop"
+        assert req.output_text == ""
+
+
+class TestAdmissionReclaim:
+    def test_admission_evicts_prefix_cache_instead_of_failing(self):
+        """A request that fits only after prefix-cache eviction must be
+        admitted, not permanently rejected as too large."""
+        import torch
+
+        engine = ScriptedEngine(script=[1, EOS_ID])
+        mgr = engine.kv_cache_manager
+        mgr.max_total_blocks = 4
+        mgr.config.prefix_cache_block_fraction = 1.0
+
+        kv = ((torch.zeros(1, 1, 16, 4), torch.zeros(1, 1, 16, 4)),)
+        mgr.allocate_sequence("donor", 48)
+        mgr.promote_prefix_chain([9101, 9102, 9103], "donor", [kv, kv, kv])
+        mgr.free_sequence("donor")
+        assert mgr.num_free_blocks == 1
+
+        # Needs 3 blocks (3 prompt tokens + 30 max_tokens), only 1 free.
+        req, _ = run_request(engine, SamplingParams(max_tokens=30))
+        assert req.status == RequestStatus.COMPLETED
+
+
+class TestCancelledInQueue:
+    def test_cancelled_waiting_request_skips_kv_allocation(self):
+        engine = ScriptedEngine(script=[1, EOS_ID])
+        calls = []
+        orig = engine.kv_cache_manager.allocate_sequence
+
+        def tracking_allocate(*args, **kwargs):
+            calls.append(args)
+            return orig(*args, **kwargs)
+
+        engine.kv_cache_manager.allocate_sequence = tracking_allocate
+        scheduler = Scheduler(engine, SchedulerConfig())
+
+        async def _go():
+            req = GenerationRequest(prompt="hi", sampling_params=SamplingParams(max_tokens=5))
+            req.cancel()
+            return await asyncio.wait_for(scheduler.submit(req), timeout=10)
+
+        req = asyncio.run(_go())
+        assert req.status == RequestStatus.CANCELLED
+        assert not calls, "cancelled request should never allocate KV blocks"
+
+
+class TestQueueFullAccounting:
+    def test_queue_full_rejection_counted_in_stats(self):
+        engine = ScriptedEngine(script=[EOS_ID])
+        scheduler = Scheduler(engine, SchedulerConfig(max_waiting_requests=0))
+
+        async def _go():
+            return await scheduler.submit(GenerationRequest(prompt="hi"))
+
+        req = asyncio.run(_go())
+        assert req.status == RequestStatus.FAILED
+        assert scheduler.stats.failed_requests == 1
+        assert scheduler.stats.total_requests == 1
+
+
 class TestStreamSignaling:
     def test_token_callback_receives_finished_signal(self):
         engine = ScriptedEngine(script=[1, 2, EOS_ID])

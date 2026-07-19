@@ -59,10 +59,15 @@ class PrefillRunner:
         enabled. Generates the first output token only after the final chunk
         completes.
         """
+        if req.is_cancelled:
+            return
+
         if not req.prompt_token_ids:
             req.prompt_token_ids = self._runtime.tokenize(req.prompt)
 
-        req.started_at = time.time()
+        # Chunked prefill re-enters here; only the first chunk starts the clock.
+        if req.started_at is None:
+            req.started_at = time.time()
         req.status = RequestStatus.RUNNING
 
         # Fast forward cursor if prefix cache hit

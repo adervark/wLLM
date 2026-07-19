@@ -147,22 +147,25 @@ class BlockAllocator:
         return True
 
     def extend(self, seq_id: str, additional_tokens: int, free_blocks: int) -> bool:
-        """Grow an existing sequence, filling the last block before adding new ones."""
+        """Grow an existing sequence, filling the last block before adding new ones.
+
+        The budget check happens before any mutation, so a rejected extension
+        leaves the sequence's accounting exactly as it was.
+        """
         seq_blocks = self.sequences[seq_id]
 
-        remaining = additional_tokens
         # Only the last block can have free slots; all previous blocks are full
-        if seq_blocks.blocks:
-            last_block = seq_blocks.blocks[-1]
-            fill = min(remaining, last_block.free_slots)
+        last_block = seq_blocks.blocks[-1] if seq_blocks.blocks else None
+        fill = min(additional_tokens, last_block.free_slots) if last_block else 0
+        remaining = additional_tokens - fill
+        if remaining > 0 and self.blocks_needed(remaining) > free_blocks:
+            return False
+
+        if last_block is not None:
             last_block.num_tokens += fill
-            remaining -= fill
 
         if remaining > 0:
             needed = self.blocks_needed(remaining)
-            if needed > free_blocks:
-                return False
-
             for _ in range(needed):
                 tokens_in_block = min(remaining, self.block_size)
                 seq_blocks.blocks.append(self._new_block(tokens_in_block))

@@ -92,7 +92,22 @@ class KVCacheManager:
     def extend_sequence(self, seq_id: str, additional_tokens: int) -> bool:
         if seq_id not in self.allocator.sequences:
             return self.allocate_sequence(seq_id, additional_tokens)
+        if self.allocator.extend(seq_id, additional_tokens, self.num_free_blocks):
+            return True
+        # Under pressure, cached prefixes are the reclaimable part of the
+        # budget: evict them before failing a running sequence's growth.
+        self.ensure_free_blocks(self.allocator.blocks_needed(additional_tokens))
         return self.allocator.extend(seq_id, additional_tokens, self.num_free_blocks)
+
+    def ensure_free_blocks(self, num_blocks: int) -> bool:
+        """Evict prefix-cache entries (LRU leaves first) until ``num_blocks``
+        are free; returns whether the target was reached."""
+        while self.num_free_blocks < num_blocks:
+            block = self.prefix_cache.pop_lru_leaf()
+            if block is None:
+                break  # nothing evictable left
+            self.allocator.unpin_block(block)
+        return self.num_free_blocks >= num_blocks
 
     def free_sequence(self, seq_id: str):
         self.allocator.free(seq_id)
@@ -126,17 +141,23 @@ class KVCacheManager:
 
         seq_blocks = self.allocator.sequences[seq_id].blocks
         n = min(len(prefix_hashes), len(per_block_kv), len(seq_blocks))
+        # Cumulative block list built from the cache's *canonical* blocks: when
+        # a lower hash was promoted by another sequence, its pinned blocks are
+        # the ones the chain must reference — this sequence's own duplicates
+        # are freed with it and must never leak into a stored chain.
+        chain: list[KVBlock] = []
         for i in range(n):
             prefix_hash = prefix_hashes[i]
-            if prefix_hash in self.prefix_cache:
+            existing = self.prefix_cache.blocks_by_hash.get(prefix_hash)
+            if existing is not None:
+                chain = list(existing)
                 continue
             # Pin only the new block this hash introduces; lower blocks were
             # pinned by their own (shorter) cumulative hash.
             self.allocator.pin_block(seq_blocks[i])
+            chain = chain + [seq_blocks[i]]
             parent_hash = prefix_hashes[i - 1] if i > 0 else None
-            self.prefix_cache.store(
-                prefix_hash, seq_blocks[: i + 1], per_block_kv[i], parent_hash
-            )
+            self.prefix_cache.store(prefix_hash, chain, per_block_kv[i], parent_hash)
 
         self._evict_prefix_cache()
         logger.debug("Promoted prefix chain of up to %d blocks for seq %s", n, seq_id)

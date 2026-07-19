@@ -386,6 +386,78 @@ class TestExtendSequence:
         seq = manager._sequences["s1"]
         assert seq.total_tokens == 15
 
+    def test_failed_extend_leaves_accounting_untouched(self, manager):
+        """A rejected extension must not partially mutate the sequence's blocks."""
+        manager.max_total_blocks = 2
+        manager.allocate_sequence("s1", 20)  # 2 blocks: 16 + 4
+        seq = manager._sequences["s1"]
+        assert manager.extend_sequence("s1", 40) is False
+        assert seq.total_tokens == 20
+        assert seq.blocks[-1].num_tokens == 4
+
+
+# --- Fault regressions: prefix cache vs. memory pressure ---
+
+
+class TestPrefixCacheReclaim:
+    @staticmethod
+    def _kv():
+        return ((torch.zeros(1, 1, 16, 4), torch.zeros(1, 1, 16, 4)),)
+
+    def _manager(self, max_blocks):
+        config = KVCacheConfig(block_size=16, prefix_cache_block_fraction=1.0)
+        mgr = KVCacheManager(config)
+        mgr.max_total_blocks = max_blocks
+        return mgr
+
+    def test_extend_reclaims_prefix_cache_blocks(self):
+        """When decode needs blocks that only the prefix cache holds, the
+        cache must be evicted rather than failing the extension."""
+        mgr = self._manager(3)
+        mgr.allocate_sequence("donor", 16)
+        mgr.promote_prefix_chain([700], "donor", [self._kv()])
+        mgr.free_sequence("donor")  # block survives, pinned by the prefix cache
+        assert mgr.num_free_blocks == 2
+
+        mgr.allocate_sequence("s1", 32)
+        assert mgr.num_free_blocks == 0
+        assert mgr.extend_sequence("s1", 16) is True
+        assert 700 not in mgr.prefix_cache
+
+    def test_allocate_still_fails_when_nothing_reclaimable(self):
+        mgr = self._manager(1)
+        mgr.allocate_sequence("s1", 16)
+        assert mgr.extend_sequence("s1", 16) is False
+
+
+class TestCanonicalChainPromotion:
+    def test_chain_promotion_reuses_canonical_cached_blocks(self):
+        """Extending a chain whose lower hashes were promoted by a *different*
+        sequence must reference the already-pinned canonical blocks, never the
+        promoting sequence's own (soon-to-be-freed) duplicates."""
+        config = KVCacheConfig(block_size=16, prefix_cache_block_fraction=1.0)
+        manager = KVCacheManager(config)
+        manager.max_total_blocks = 100
+        kv = ((torch.zeros(1, 1, 16, 4), torch.zeros(1, 1, 16, 4)),)
+
+        # A promotes the shared first block.
+        manager.allocate_sequence("A", 16)
+        manager.promote_prefix_chain([4001], "A", [kv])
+        canonical = manager._prefix_cache_blocks[4001][0]
+
+        # B ran concurrently with the same first block content (different
+        # physical blocks) and promotes a longer chain after A.
+        manager.allocate_sequence("B", 32)
+        manager.promote_prefix_chain([4001, 4002], "B", [kv, kv])
+
+        manager.free_sequence("A")
+        manager.free_sequence("B")
+
+        chain = manager._prefix_cache_blocks[4002]
+        assert chain[0] is canonical
+        # Every block the cache references must still be live (pinned).
+        assert all(b.ref_count >= 1 for b in chain)
+
 
 # --- Prefix cache operations ---
 
